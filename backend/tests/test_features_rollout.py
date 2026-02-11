@@ -95,3 +95,39 @@ def test_autopilot_can_raise_low_text_dataset_toward_target():
     assert isinstance(optimization.get("actions"), list)
     preview = payload.get("preview") or {}
     assert "rag_context" in (preview.get("columns") or [])
+
+
+def test_autopilot_projection_fallback_handles_noisy_pii_heavy_dataset():
+    client = TestClient(app)
+    dataset = _create_dataset(
+        client,
+        (
+            "patient_name,email,phone,address,city,claim_id,service_date,paid_amount,notes\n"
+            "John Doe,john@example.com,312-555-1111,123 Main St,Chicago,c1,2025-01-01,120,\n"
+            "Jane Doe,jane@example.com,312-555-2222,456 Oak St,Chicago,c2,2025-01-02,130,\n"
+            "Bob Doe,bob@example.com,312-555-3333,789 Pine St,Chicago,c3,2025-01-03,140,\n"
+        ),
+        name="autopilot_projection_fallback",
+    )
+
+    response = client.post(
+        f"/api/datasets/{dataset['id']}/cleanup/autopilot",
+        json={"target_score": 95},
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    autopilot = payload.get("autopilot") or {}
+    achieved = int(autopilot.get("achieved_score") or 0)
+    assert achieved >= 95
+    assert autopilot.get("status") == "on_track"
+
+    optimization = autopilot.get("optimization") or {}
+    actions = optimization.get("actions") or []
+    assert any("projection" in str(action).lower() or "rag_context" in str(action).lower() for action in actions)
+
+    preview = payload.get("preview") or {}
+    columns = preview.get("columns") or []
+    assert "record_id" in columns
+    assert "event_date" in columns
+    assert "domain_code" in columns
+    assert "rag_context" in columns

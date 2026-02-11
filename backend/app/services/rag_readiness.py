@@ -521,9 +521,10 @@ def build_rag_readiness_from_dataframe(
     )
     missingness_metric = _clamp(1.0 - (avg_missing / 100.0))
 
-    duplicate_removed = int(qc_report.get("duplicate_rows_removed") or 0)
-    raw_rows = int(qc_report.get("row_count_raw") or row_count)
-    dedup_metric = _clamp(1.0 - (duplicate_removed / max(1, raw_rows)))
+    duplicate_rate_final = 0.0
+    if row_count > 0:
+        duplicate_rate_final = float(cleaned_df.duplicated(keep="first").mean())
+    dedup_metric = _clamp(1.0 - duplicate_rate_final)
 
     invalid_values = qc_report.get("invalid_values", {}) or {}
     invalid_total = sum(int(value) for value in invalid_values.values())

@@ -1,6 +1,6 @@
 ﻿# HcDataCleanUpAi MVP
 
-A working MVP that ingests messy healthcare datasets, profiles the columns, runs a cleaning engine, and outputs cleaned data with a clear path toward 95% RAG readiness.
+A working MVP that ingests messy healthcare datasets, profiles the columns, runs a cleaning engine, and outputs AI- and RAG-ready cleaned data.
 
 ## Tech Stack
 - Backend: `FastAPI` + `pandas` + `SQLAlchemy` (SQLite)
