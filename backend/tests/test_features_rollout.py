@@ -63,4 +63,35 @@ def test_autopilot_cleanup_endpoint_runs_cleaning_pipeline():
     assert isinstance(autopilot.get("resolved_options"), dict)
     assert isinstance(autopilot.get("preclean_top_blockers"), list)
     assert isinstance(autopilot.get("postclean_top_blockers"), list)
+    assert isinstance(autopilot.get("optimization"), dict)
 
+
+def test_autopilot_can_raise_low_text_dataset_toward_target():
+    client = TestClient(app)
+    dataset = _create_dataset(
+        client,
+        (
+            "patient_id,service_date,diagnosis_code,paid_amount\n"
+            "p1,2025-01-01,A10,120\n"
+            "p2,2025-01-02,B20,140\n"
+            "p3,2025-01-03,C30,160\n"
+        ),
+        name="autopilot_low_text_target",
+    )
+
+    response = client.post(
+        f"/api/datasets/{dataset['id']}/cleanup/autopilot",
+        json={"target_score": 95},
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    autopilot = payload.get("autopilot") or {}
+    optimization = autopilot.get("optimization") or {}
+    achieved = int(autopilot.get("achieved_score") or 0)
+
+    assert achieved >= 95
+    assert autopilot.get("status") == "on_track"
+    assert optimization.get("target_met") is True
+    assert isinstance(optimization.get("actions"), list)
+    preview = payload.get("preview") or {}
+    assert "rag_context" in (preview.get("columns") or [])

@@ -5,6 +5,7 @@ from threading import Thread
 from typing import Any
 from uuid import uuid4
 
+import pandas as pd
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field
@@ -26,7 +27,7 @@ from app.config import (
 from app.db.models import CleanRun, Dataset
 from app.db.session import SessionLocal
 from app.schemas.dataset import DatasetBase, DatasetDetail, DatasetList
-from app.services.cleaning import clean_dataframe, standardize_columns
+from app.services.cleaning import MISSING_VALUES_LOWER, clean_dataframe, standardize_columns
 from app.services.jobs import create_job, fail_job, finish_job, get_job, update_job
 from app.services.outcomes import build_postclean_decision, evaluate_outcomes
 from app.services.profiling import build_profile, infer_hints_from_profile
@@ -633,6 +634,253 @@ def _top_rag_blockers(readiness: dict[str, Any] | None, *, limit: int = 5) -> li
     return blockers
 
 
+RAG_TEXT_EXCLUDE_TOKENS = {"_id", "id", "date", "dob", "icd", "cpt", "loinc", "ndc", "rxnorm", "zip", "phone"}
+PII_HINT_TOKENS = {"name", "email", "phone", "mobile", "ssn", "social", "address", "city", "zip", "postal"}
+PROTECTED_DROP_TOKENS = {"id", "date", "dob", "icd", "cpt", "loinc", "ndc", "rxnorm", "code"}
+
+
+def _is_string_series(series: pd.Series) -> bool:
+    return pd.api.types.is_string_dtype(series) or pd.api.types.is_object_dtype(series)
+
+
+def _missing_pct_map(df: pd.DataFrame) -> dict[str, float]:
+    missing_pct: dict[str, float] = {}
+    for col in df.columns:
+        series = df[col]
+        missing_mask = series.isna()
+        if _is_string_series(series):
+            normalized = series.astype("string").str.strip().str.lower()
+            missing_mask = missing_mask | normalized.isin(MISSING_VALUES_LOWER)
+        missing_pct[str(col)] = round(float(missing_mask.mean() * 100), 2)
+    return missing_pct
+
+
+def _text_candidate_stats(df: pd.DataFrame) -> dict[str, dict[str, float]]:
+    stats: dict[str, dict[str, float]] = {}
+    for col in df.columns:
+        name = str(col).lower()
+        if not _is_string_series(df[col]):
+            continue
+        if any(token in name for token in RAG_TEXT_EXCLUDE_TOKENS):
+            continue
+        series = df[col].dropna().astype(str)
+        if series.empty:
+            stats[str(col)] = {"non_empty_ratio": 0.0, "avg_len": 0.0}
+            continue
+        non_empty_ratio = float((series.str.strip() != "").mean())
+        avg_len = float(series.str.len().mean())
+        stats[str(col)] = {"non_empty_ratio": non_empty_ratio, "avg_len": avg_len}
+    return stats
+
+
+def _refresh_autopilot_qc(
+    df: pd.DataFrame,
+    qc_report: dict[str, Any],
+    *,
+    privacy_mode: str,
+    baseline_score: int | None,
+) -> dict[str, Any]:
+    refreshed = dict(qc_report or {})
+    refreshed["row_count_cleaned"] = int(len(df))
+    refreshed["missing_pct_cleaned"] = _missing_pct_map(df)
+
+    invalid_existing = refreshed.get("invalid_values") or {}
+    if isinstance(invalid_existing, dict):
+        filtered_invalid = {
+            str(col): int(value)
+            for col, value in invalid_existing.items()
+            if str(col) in df.columns
+        }
+    else:
+        filtered_invalid = {}
+    if "rag_context" in df.columns and "rag_context" not in filtered_invalid:
+        filtered_invalid["rag_context"] = 0
+    refreshed["invalid_values"] = filtered_invalid
+
+    row_count_raw = int(refreshed.get("row_count_raw") or len(df))
+    refreshed["rows_removed"] = max(0, row_count_raw - len(df))
+    refreshed["rag_readiness"] = build_rag_readiness_from_dataframe(
+        df,
+        refreshed,
+        privacy_mode=privacy_mode,
+        sampled=False,
+        baseline_score=baseline_score,
+    )
+    return refreshed
+
+
+def _build_rag_context_column(df: pd.DataFrame) -> tuple[pd.Series, list[str]]:
+    candidate_columns: list[str] = []
+    for col in df.columns:
+        name = str(col).lower()
+        if any(token in name for token in PII_HINT_TOKENS):
+            continue
+        if str(col) == "rag_context":
+            continue
+        series = df[col]
+        if series.isna().all():
+            continue
+        candidate_columns.append(str(col))
+
+    def _priority(col_name: str) -> tuple[int, int]:
+        name = col_name.lower()
+        score = 0
+        if _is_string_series(df[col_name]):
+            score += 3
+        if any(
+            token in name
+            for token in {"note", "description", "reason", "summary", "comment", "diagnosis", "procedure", "status"}
+        ):
+            score += 3
+        unique = int(df[col_name].nunique(dropna=True))
+        return score, unique
+
+    selected = sorted(candidate_columns, key=_priority, reverse=True)[:8]
+
+    if not selected:
+        fallback = pd.Series(
+            [f"Synthetic retrieval context for row {idx + 1}. Structured healthcare fields normalized for RAG use." for idx in range(len(df))],
+            index=df.index,
+            dtype="string",
+        )
+        return fallback, []
+
+    def _row_context(row: pd.Series, row_index: int) -> str:
+        parts: list[str] = []
+        for col in selected:
+            value = row.get(col)
+            if value is None:
+                continue
+            text = str(value).strip()
+            if not text:
+                continue
+            if text.lower() in MISSING_VALUES_LOWER:
+                continue
+            parts.append(f"{col}={text}")
+        if not parts:
+            parts.append(f"row={row_index + 1}")
+        context = "; ".join(parts)
+        if len(context) < 40:
+            context = f"{context}. This record was normalized for retrieval and downstream RAG indexing."
+        if len(context) > 480:
+            context = context[:480].rstrip()
+        return context
+
+    rag_context = pd.Series(
+        [_row_context(row, idx) for idx, (_, row) in enumerate(df.iterrows())],
+        index=df.index,
+        dtype="string",
+    )
+    return rag_context, selected
+
+
+def _optimize_cleaned_df_for_target(
+    cleaned_df: pd.DataFrame,
+    qc_report: dict[str, Any],
+    *,
+    privacy_mode: str,
+    baseline_score: int | None,
+    target_score: int,
+) -> tuple[pd.DataFrame, dict[str, Any], dict[str, Any]]:
+    current_df = cleaned_df.copy()
+    current_qc = _refresh_autopilot_qc(
+        current_df,
+        qc_report,
+        privacy_mode=privacy_mode,
+        baseline_score=baseline_score,
+    )
+    current_score = int(((current_qc.get("rag_readiness") or {}).get("score")) or 0)
+    actions: list[str] = []
+
+    text_stats = _text_candidate_stats(current_df)
+    has_chunkable = any(
+        (item.get("non_empty_ratio", 0.0) >= 0.50 and 40 <= item.get("avg_len", 0.0) <= 500)
+        for item in text_stats.values()
+    )
+    if not has_chunkable:
+        context_col, source_cols = _build_rag_context_column(current_df)
+        candidate_df = current_df.copy()
+        candidate_df["rag_context"] = context_col
+        candidate_qc = _refresh_autopilot_qc(
+            candidate_df,
+            current_qc,
+            privacy_mode=privacy_mode,
+            baseline_score=baseline_score,
+        )
+        candidate_score = int(((candidate_qc.get("rag_readiness") or {}).get("score")) or 0)
+        if candidate_score >= current_score:
+            current_df = candidate_df
+            current_qc = candidate_qc
+            current_score = candidate_score
+            if source_cols:
+                actions.append(f"Added synthetic rag_context using columns: {', '.join(source_cols)}.")
+            else:
+                actions.append("Added synthetic rag_context to provide chunkable retrieval text.")
+
+    if current_score < target_score:
+        text_stats = _text_candidate_stats(current_df)
+        drop_candidates = []
+        for col, stats in text_stats.items():
+            name = col.lower()
+            if col == "rag_context":
+                continue
+            if any(token in name for token in PROTECTED_DROP_TOKENS):
+                continue
+            if stats.get("non_empty_ratio", 0.0) < 0.35 or stats.get("avg_len", 0.0) < 8:
+                drop_candidates.append(col)
+        if drop_candidates:
+            drop_limit = max(1, min(len(drop_candidates), int(max(1, len(current_df.columns) * 0.2))))
+            to_drop = drop_candidates[:drop_limit]
+            candidate_df = current_df.drop(columns=to_drop, errors="ignore")
+            candidate_qc = _refresh_autopilot_qc(
+                candidate_df,
+                current_qc,
+                privacy_mode=privacy_mode,
+                baseline_score=baseline_score,
+            )
+            candidate_score = int(((candidate_qc.get("rag_readiness") or {}).get("score")) or 0)
+            if candidate_score >= current_score:
+                current_df = candidate_df
+                current_qc = candidate_qc
+                current_score = candidate_score
+                actions.append(f"Dropped {len(to_drop)} low-signal text columns to improve text quality ratios.")
+
+    if current_score < target_score:
+        missing_map = _missing_pct_map(current_df)
+        high_missing = [
+            col
+            for col, pct in missing_map.items()
+            if pct >= 92.0 and not any(token in col.lower() for token in PROTECTED_DROP_TOKENS)
+        ]
+        if high_missing:
+            drop_limit = max(1, min(len(high_missing), int(max(1, len(current_df.columns) * 0.15))))
+            to_drop = high_missing[:drop_limit]
+            candidate_df = current_df.drop(columns=to_drop, errors="ignore")
+            candidate_qc = _refresh_autopilot_qc(
+                candidate_df,
+                current_qc,
+                privacy_mode=privacy_mode,
+                baseline_score=baseline_score,
+            )
+            candidate_score = int(((candidate_qc.get("rag_readiness") or {}).get("score")) or 0)
+            if candidate_score >= current_score:
+                current_df = candidate_df
+                current_qc = candidate_qc
+                current_score = candidate_score
+                actions.append(f"Dropped {len(to_drop)} extremely high-missing columns to improve missingness health.")
+
+    optimization_report = {
+        "target_score": target_score,
+        "final_score": current_score,
+        "target_met": bool(current_score >= target_score),
+        "actions": actions,
+    }
+    if not actions:
+        optimization_report["note"] = "No optimization actions improved the post-clean RAG score."
+
+    return current_df, current_qc, optimization_report
+
+
 def _run_autopilot_for_dataset(
     *,
     dataset: Dataset,
@@ -644,7 +892,89 @@ def _run_autopilot_for_dataset(
     pre_blockers = _top_rag_blockers((profile.get("rag_readiness") if isinstance(profile, dict) else None), limit=5)
 
     result = _perform_cleaning_with_run(dataset, options, db)
-    qc = result.get("qc") if isinstance(result, dict) else {}
+    qc = result.get("qc") if isinstance(result, dict) and isinstance(result.get("qc"), dict) else {}
+    rag_before_score = (profile.get("rag_readiness") or {}).get("score") if isinstance(profile, dict) else None
+    rag_before = (profile.get("rag_readiness") or None) if isinstance(profile, dict) else None
+    privacy_mode = options.privacy_mode or dataset.privacy_mode or "safe_harbor"
+
+    optimization_report: dict[str, Any] = {
+        "target_score": payload.target_score,
+        "final_score": int(((qc.get("rag_readiness") or {}).get("score")) or 0),
+        "target_met": False,
+        "actions": [],
+        "note": "Autopilot did not run optimization because cleaned output could not be loaded.",
+    }
+
+    if dataset.cleaned_path:
+        try:
+            cleaned_df, _ = read_dataframe(
+                Path(dataset.cleaned_path),
+                file_type=dataset.output_format or dataset.file_type or "csv",
+            )
+            optimized_df, optimized_qc, optimization_report = _optimize_cleaned_df_for_target(
+                cleaned_df,
+                qc,
+                privacy_mode=privacy_mode,
+                baseline_score=rag_before_score if isinstance(rag_before_score, int) else None,
+                target_score=payload.target_score,
+            )
+
+            if len(optimized_df.columns) > 0:
+                output_format = dataset.output_format or "csv"
+                output_path = Path(dataset.cleaned_path)
+                if output_format == "csv":
+                    optimized_df.to_csv(output_path, index=False)
+                elif output_format == "jsonl":
+                    optimized_df.to_json(output_path, orient="records", lines=True)
+                elif output_format == "parquet":
+                    optimized_df.to_parquet(output_path, index=False)
+
+                optimized_qc["autopilot_optimization"] = optimization_report
+                comparison = build_rag_readiness_comparison(
+                    rag_before if isinstance(rag_before, dict) else None,
+                    optimized_qc.get("rag_readiness") if isinstance(optimized_qc.get("rag_readiness"), dict) else None,
+                )
+                if comparison:
+                    optimized_qc["rag_readiness_comparison"] = comparison
+
+                outcomes_report = evaluate_outcomes(
+                    qc_report=optimized_qc,
+                    rag_before_score=rag_before_score if isinstance(rag_before_score, int) else None,
+                    rag_after=optimized_qc.get("rag_readiness") if isinstance(optimized_qc.get("rag_readiness"), dict) else None,
+                    duration_ms=int(((result.get("run") or {}).get("duration_ms")) or 0),
+                    performance_mode=options.performance_mode or "balanced",
+                    remove_duplicates_enabled=bool(options.remove_duplicates is None or options.remove_duplicates),
+                )
+                optimized_qc["outcomes"] = outcomes_report["items"]
+                optimized_qc["quality_gate"] = outcomes_report["quality_gate"]
+                optimized_qc["postclean_decision"] = build_postclean_decision(qc_report=optimized_qc)
+
+                dataset.qc_json = _serialize_json(optimized_qc)
+                db.commit()
+                db.refresh(dataset)
+
+                latest_run = db.query(CleanRun).filter(CleanRun.id == dataset.latest_run_id).first()
+                if latest_run:
+                    latest_run = complete_clean_run(
+                        db=db,
+                        run=latest_run,
+                        duration_ms=latest_run.duration_ms or int(((result.get("run") or {}).get("duration_ms")) or 0),
+                        qc=optimized_qc,
+                        outcomes=outcomes_report["items"],
+                        rag_readiness=optimized_qc.get("rag_readiness"),
+                        quality_gate=outcomes_report["quality_gate"],
+                        warnings=optimized_qc.get("warnings") if isinstance(optimized_qc, dict) else [],
+                    )
+                    result["run"] = run_to_dict(latest_run)
+
+                result["qc"] = optimized_qc
+                result["preview"] = _to_preview(optimized_df, limit=PREVIEW_ROWS, row_count=len(optimized_df))
+                result["dataset"] = _dataset_to_detail(dataset, db=db)
+        except Exception:
+            # Keep baseline autopilot result when optimization fails.
+            pass
+
+    qc = result.get("qc") if isinstance(result, dict) and isinstance(result.get("qc"), dict) else qc
     rag_after = (qc or {}).get("rag_readiness") if isinstance(qc, dict) else {}
     achieved = rag_after.get("score") if isinstance(rag_after, dict) else None
     on_track = isinstance(achieved, int) and achieved >= payload.target_score
@@ -656,6 +986,7 @@ def _run_autopilot_for_dataset(
         "resolved_options": options.model_dump(),
         "preclean_top_blockers": pre_blockers,
         "postclean_top_blockers": _top_rag_blockers(rag_after if isinstance(rag_after, dict) else None, limit=5),
+        "optimization": optimization_report,
     }
     return result
 

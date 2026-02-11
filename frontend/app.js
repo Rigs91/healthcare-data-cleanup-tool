@@ -2193,9 +2193,20 @@ if (runAutopilotBtn) {
       const autopilot = result.autopilot || {};
       const achieved = autopilot.achieved_score;
       const statusText = autopilot.status === "on_track" ? "On track for target." : "Needs attention to hit target.";
+      const optimization = autopilot.optimization || {};
+      const actions = Array.isArray(optimization.actions) ? optimization.actions : [];
+      const actionText = actions.length
+        ? ` Applied ${actions.length} optimization action(s).`
+        : optimization.note
+          ? ` ${optimization.note}`
+          : "";
+      const blockers = Array.isArray(autopilot.postclean_top_blockers) ? autopilot.postclean_top_blockers : [];
+      const blockerText = blockers.length
+        ? ` Next priority: ${(blockers[0].label || blockers[0].id || "RAG check")} -> ${blockers[0].recommendation || "review check details."}`
+        : "";
       setStatus(
         cleanStatusEl,
-        `Autopilot complete. Readiness: ${achieved ?? "n/a"}/100. ${statusText}`
+        `Autopilot complete. Readiness: ${achieved ?? "n/a"}/100. ${statusText}${actionText}${blockerText}`
       );
       setWizardStep(4);
 
