@@ -1,0 +1,309 @@
+﻿<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>HcDataCleanUpAi MVP</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="background">
+      <div class="blob blob--one"></div>
+      <div class="blob blob--two"></div>
+      <div class="grid-overlay"></div>
+    </div>
+    <div id="fullscreen-backdrop" class="fullscreen-backdrop"></div>
+    <main class="container">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">Healthcare Data Cleanup</p>
+          <h1>Turn messy healthcare data into 95% RAG-ready datasets.</h1>
+          <p class="subtitle">
+            Ingest file exports or connector sources, auto-assess schema + quality, run a
+            context-aware cleanup engine, and deliver clean outputs ready for retrieval and downstream AI.
+          </p>
+          <div id="api-status" class="api-status">API: checking...</div>
+          <div id="api-status-detail" class="api-status-detail"></div>
+          <div class="hero-controls">
+            <label class="field compact">
+              <span>View mode</span>
+              <select id="view-mode">
+                <option value="simple" selected>Simple</option>
+                <option value="advanced">Advanced</option>
+              </select>
+            </label>
+            <label class="toggle">
+              <input id="guided-mode" type="checkbox" checked />
+              <span>Guided mode</span>
+            </label>
+          </div>
+          <div id="feature-catalog-status" class="helper"></div>
+        </div>
+        <div class="hero-card">
+          <h3>Pipeline Stages</h3>
+          <ul class="pipeline">
+            <li>Ingest and analyze</li>
+            <li>Detection snapshot + pre-clean readiness</li>
+            <li>Cleaning run + post-clean decision</li>
+          </ul>
+        </div>
+      </header>
+
+      <section class="card" id="upload-card">
+        <div class="card-header">
+          <h2>1. Ingest</h2>
+          <span class="badge">CSV / TSV / JSONL / Parquet</span>
+        </div>
+        <div id="wizard-steps" class="wizard-steps">
+          <div class="wizard-step" data-step="1">1. Upload</div>
+          <div class="wizard-step" data-step="2">2. Review</div>
+          <div class="wizard-step" data-step="3">3. Clean</div>
+          <div class="wizard-step" data-step="4">4. Download</div>
+        </div>
+        <div id="wizard-next-action" class="helper"></div>
+        <div class="source-grid">
+          <button class="source-option active" type="button" data-source="file">
+            <span>File Upload</span>
+            <small>Interactive</small>
+          </button>
+          <div class="source-option roadmap">
+            <span>Google Drive</span>
+            <small>Coming soon</small>
+          </div>
+          <div class="source-option roadmap">
+            <span>AWS S3</span>
+            <small>Roadmap</small>
+          </div>
+          <div class="source-option roadmap">
+            <span>Snowflake</span>
+            <small>Roadmap</small>
+          </div>
+          <div class="source-option roadmap">
+            <span>Oracle</span>
+            <small>Roadmap</small>
+          </div>
+          <div class="source-option roadmap">
+            <span>FHIR / HL7</span>
+            <small>Roadmap</small>
+          </div>
+        </div>
+        <div class="helper">Google Drive import is a future enhancement. Use file upload for now.</div>
+        <form id="upload-form" class="upload-form">
+          <label class="field">
+            <span>Dataset name</span>
+            <input id="dataset-name" type="text" placeholder="Claims export - Jan 2026" />
+          </label>
+          <label class="field">
+            <span>Intended usage</span>
+            <select id="usage-intent">
+              <option value="training">AI training data</option>
+              <option value="inference">AI inference / embedding</option>
+              <option value="analytics">Analytics / reporting</option>
+              <option value="external_share">External data exchange</option>
+            </select>
+            <div id="usage-intent-note" class="helper"></div>
+          </label>
+          <label class="field">
+            <span>Output format</span>
+            <select id="output-format">
+              <option value="csv">CSV</option>
+              <option value="jsonl">JSONL</option>
+              <option value="parquet">Parquet</option>
+            </select>
+          </label>
+          <label id="dataset-file-field" class="field">
+            <span>File</span>
+            <input id="dataset-file" type="file" accept=".csv,.tsv,.jsonl,.ndjson,.parquet" required />
+          </label>
+          <button id="upload-button" type="submit" class="primary">Upload and Analyze</button>
+        </form>
+        <div id="status" class="status"></div>
+        <div class="progress">
+          <div id="upload-progress-bar" class="progress-bar"></div>
+        </div>
+        <div id="upload-progress-text" class="status"></div>
+        <div class="pill-row">
+          <span class="pill">Claims</span>
+          <span class="pill">EHR / Clinical</span>
+          <span class="pill">Labs</span>
+          <span class="pill">Pharmacy</span>
+          <span class="pill">Imaging metadata</span>
+        </div>
+      </section>
+
+      <section class="card" id="raw-preview-card">
+        <div class="card-header">
+          <h2>2. Data Detection Snapshot</h2>
+          <span class="badge">First 50 rows</span>
+        </div>
+        <div id="meta-grid" class="meta-grid"></div>
+        <div class="table-wrap">
+          <table id="raw-preview-table"></table>
+        </div>
+      </section>
+
+      <section class="card" id="profile-card">
+        <div class="card-header">
+          <h2>3. Pre-Clean Check</h2>
+          <button id="refresh-profile" class="ghost" disabled>Refresh View</button>
+        </div>
+        <div id="profile-summary" class="summary"></div>
+        <div id="assessment-primary" class="summary"></div>
+        <div id="assessment-blockers" class="detail-grid"></div>
+        <div id="assessment-explainability" class="detail-grid"></div>
+        <div id="assessment-overview" class="assessment-grid"></div>
+        <details class="advanced-panel">
+          <summary>Advanced: Assessment + RAG details</summary>
+          <div id="assessment-legend" class="legend"></div>
+          <div id="assessment-factors" class="detail-grid"></div>
+          <div id="assessment-rag" class="detail-grid"></div>
+          <pre id="assessment-advanced" class="code"></pre>
+        </details>
+        <div id="profile-flags" class="flag-grid"></div>
+        <div id="domain-suggestions" class="flag-grid"></div>
+        <div class="table-wrap">
+          <table id="profile-table"></table>
+        </div>
+      </section>
+
+      <section class="card" id="clean-card">
+        <div class="card-header">
+          <h2>4. Cleaning Plan / Run</h2>
+          <span class="badge">Context-aware rules</span>
+        </div>
+        <div class="options">
+          <label class="field">
+            <span>Privacy mode</span>
+            <select id="opt-privacy-mode">
+              <option value="safe_harbor">HIPAA Safe Harbor</option>
+              <option value="none">No de-identification</option>
+            </select>
+            <div class="helper">
+              Safe Harbor masks identifiers and generalizes dates to year only (ages > 89 become 90+).
+            </div>
+          </label>
+          <label class="field">
+            <span>Performance mode</span>
+            <select id="opt-performance-mode">
+              <option value="balanced">Balanced (recommended)</option>
+              <option value="fast">Fast (skip validation checks)</option>
+              <option value="ultra_fast">Ultra fast (skip most normalization)</option>
+            </select>
+            <div class="helper">
+              Fast mode increases chunk size and skips validation issues to speed up large files. Ultra fast skips most
+              normalization and type coercion for maximum throughput.
+            </div>
+          </label>
+          <label class="field">
+            <span>Type coercion mode</span>
+            <select id="opt-coercion-mode">
+              <option value="safe">Safe (preserve invalid values)</option>
+              <option value="strict">Strict (invalid values become empty)</option>
+            </select>
+          </label>
+          <label class="toggle">
+            <input id="opt-normalize-phone" type="checkbox" checked />
+            <span>Normalize phone numbers</span>
+          </label>
+          <label class="toggle">
+            <input id="opt-normalize-zip" type="checkbox" checked />
+            <span>Normalize ZIP/postal codes</span>
+          </label>
+          <label class="toggle">
+            <input id="opt-normalize-gender" type="checkbox" checked />
+            <span>Normalize gender values</span>
+          </label>
+          <label class="field">
+            <span>Text case normalization</span>
+            <select id="opt-text-case">
+              <option value="none">No change</option>
+              <option value="lower">lowercase</option>
+              <option value="upper">UPPERCASE</option>
+              <option value="title">Title Case</option>
+            </select>
+          </label>
+          <label class="toggle">
+            <input id="opt-dedup" type="checkbox" checked />
+            <span>Remove duplicate rows</span>
+          </label>
+          <label class="toggle">
+            <input id="opt-drop-empty" type="checkbox" checked />
+            <span>Drop fully empty columns</span>
+          </label>
+          <label class="field">
+            <span>Output format override</span>
+            <select id="opt-output-format">
+              <option value="csv">CSV</option>
+              <option value="jsonl">JSONL</option>
+              <option value="parquet">Parquet</option>
+            </select>
+          </label>
+        </div>
+        <div class="action-row">
+          <button id="run-autopilot" class="primary" disabled>Run 95% Autopilot</button>
+          <button id="run-cleaning" class="primary" disabled>Run Cleaning</button>
+        </div>
+        <div id="clean-status" class="status"></div>
+        <div class="progress">
+          <div id="clean-progress-bar" class="progress-bar"></div>
+        </div>
+        <div id="clean-progress-text" class="status"></div>
+        <div id="run-history" class="detail-grid"></div>
+        <div class="download">
+          <a id="download-link" class="ghost" href="#" target="_blank" rel="noreferrer">Download cleaned file</a>
+        </div>
+      </section>
+
+      <section class="card" id="preview-card">
+        <div class="card-header">
+          <h2>5. What Changed + Before / After Preview</h2>
+          <div class="header-actions">
+            <span class="badge">First 50 rows</span>
+            <button id="preview-fullscreen" class="ghost" disabled>Full screen</button>
+            <button id="preview-close" class="ghost hidden">Close</button>
+          </div>
+        </div>
+        <div id="what-changed-summary" class="summary"></div>
+        <div id="what-changed-metrics" class="detail-grid"></div>
+        <div id="what-changed-examples" class="issue-list"></div>
+        <div class="preview-grid">
+          <div class="preview-panel">
+            <div class="preview-label">Raw upload</div>
+            <div class="table-wrap">
+              <table id="preview-raw-table"></table>
+            </div>
+          </div>
+          <div class="preview-panel">
+            <div class="preview-label">Cleaned output</div>
+            <div class="table-wrap">
+              <table id="preview-clean-table"></table>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="card" id="qc-card">
+        <div class="card-header">
+          <h2>6. Result & Download</h2>
+          <span class="badge">95% Target</span>
+        </div>
+        <div id="qc-decision" class="summary"></div>
+        <div id="qc-primary-result" class="summary"></div>
+        <a id="qc-download-link" class="ghost hidden" href="#" target="_blank" rel="noreferrer">Download cleaned dataset</a>
+        <details class="advanced-panel">
+          <summary>Advanced: Diagnostics and QC details</summary>
+          <div id="qc-summary" class="summary"></div>
+          <div id="qc-outcomes" class="detail-grid"></div>
+          <div id="qc-severity-summary" class="detail-grid"></div>
+          <div id="qc-severity-legend" class="detail-grid"></div>
+          <div id="qc-rag" class="detail-grid"></div>
+          <div id="qc-rag-plan" class="detail-grid"></div>
+          <div id="qc-issues" class="issue-list"></div>
+          <pre id="qc-details" class="code"></pre>
+        </details>
+      </section>
+    </main>
+
+    <script src="app.js?v=0.5.3"></script>
+  </body>
+</html>

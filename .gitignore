@@ -1,0 +1,14 @@
+.env
+.venv/
+.pytest_cache/
+__pycache__/
+*.pyc
+
+# Local runtime artifacts
+data/app.db
+data/raw/
+data/cleaned/
+
+# Large local sample files
+alpha test file 2.csv
+stress_multidomain_650mb.csv

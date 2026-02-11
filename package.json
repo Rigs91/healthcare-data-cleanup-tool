@@ -1,0 +1,9 @@
+﻿{
+  "name": "hc-data-cleanup-ai",
+  "version": "0.2.0",
+  "private": true,
+  "scripts": {
+    "dev": "powershell -ExecutionPolicy Bypass -File .\\scripts\\dev.ps1",
+    "test": "powershell -ExecutionPolicy Bypass -File .\\scripts\\run_tests.ps1"
+  }
+}

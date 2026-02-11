@@ -1,0 +1,6 @@
+﻿Patient ID,DOB,Last Visit,Charge ($),ICD Code,phone,E-mail,Notes,Zip,Gender,Extra  Col
+001,1/2/1980,2023-12-01,"1,200.50",a10,312-555-1212,alice@example.com,"  Needs follow up  ",60601,F,
+001,1/2/1980,12/01/2023,"1,200.50",a10,3125551212,alice@example.com,"  Needs follow up  ",60601,F,
+002,1985-03-04,2024/01/15,900,b20,773.555.0101,bob@health.org,"?",,M,
+003,,2023-11-02,$0.00,c30,,unknown,"N/A",02139,,
+004,07-08-1979,,450.25,,(312)555-9999,,"Late check-in",60614,F, 
