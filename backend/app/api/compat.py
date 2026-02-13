@@ -30,6 +30,11 @@ async def compat_upload_complete(upload_id: str):
     return _redirect(f"/uploads/{upload_id}/complete")
 
 
+@router.api_route("/uploads/{upload_id}", methods=["GET", "DELETE", "OPTIONS"])
+async def compat_upload_session(upload_id: str):
+    return _redirect(f"/uploads/{upload_id}")
+
+
 @router.api_route("/datasets", methods=["GET", "POST", "OPTIONS"])
 async def compat_datasets():
     return _redirect("/datasets")
@@ -68,6 +73,11 @@ async def compat_clean_jobs(dataset_id: str):
 @router.api_route("/clean-jobs/{job_id}", methods=["GET", "OPTIONS"])
 async def compat_clean_job(job_id: str):
     return _redirect(f"/clean-jobs/{job_id}")
+
+
+@router.api_route("/clean-jobs/{job_id}/cancel", methods=["POST", "OPTIONS"])
+async def compat_clean_job_cancel(job_id: str):
+    return _redirect(f"/clean-jobs/{job_id}/cancel")
 
 
 @router.api_route("/datasets/{dataset_id}", methods=["GET", "OPTIONS"])

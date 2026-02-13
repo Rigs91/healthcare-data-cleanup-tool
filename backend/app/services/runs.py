@@ -88,6 +88,23 @@ def fail_clean_run(
     return run
 
 
+def cancel_clean_run(
+    *,
+    db: Session,
+    run: CleanRun,
+    error_message: str,
+    duration_ms: int | None = None,
+) -> CleanRun:
+    run.status = "cancelled"
+    run.completed_at = datetime.utcnow()
+    run.error = error_message
+    if duration_ms is not None:
+        run.duration_ms = duration_ms
+    db.commit()
+    db.refresh(run)
+    return run
+
+
 def run_to_dict(run: CleanRun) -> Dict[str, Any]:
     return {
         "id": run.id,

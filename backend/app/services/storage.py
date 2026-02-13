@@ -18,6 +18,14 @@ SUPPORTED_EXTENSIONS = {
 }
 
 
+def supported_extensions() -> list[str]:
+    return sorted({ext.lstrip(".") for ext in SUPPORTED_EXTENSIONS.keys() if ext})
+
+
+def is_supported_filename(filename: str) -> bool:
+    return Path(filename).suffix.lower() in SUPPORTED_EXTENSIONS
+
+
 def detect_file_type(filename: str) -> str:
     ext = Path(filename).suffix.lower()
     return SUPPORTED_EXTENSIONS.get(ext, "csv")

@@ -142,8 +142,67 @@ body.no-scroll {
   flex-wrap: wrap;
 }
 
+.api-config {
+  margin-top: 10px;
+  display: flex;
+  gap: 10px;
+  align-items: end;
+  flex-wrap: wrap;
+}
+
+.api-config .field.compact {
+  flex: 1;
+  min-width: 260px;
+}
+
+.api-config .ghost {
+  white-space: nowrap;
+}
+
 .field.compact {
   min-width: 180px;
+}
+
+.upload-dropzone {
+  position: relative;
+  overflow: hidden;
+  border: 2px dashed var(--border);
+  border-radius: 12px;
+  padding: 14px;
+  display: grid;
+  justify-items: center;
+  text-align: center;
+  gap: 4px;
+  cursor: pointer;
+  background: rgba(255, 255, 255, 0.75);
+}
+
+.upload-dropzone:hover {
+  border-color: rgba(249, 115, 22, 0.5);
+}
+
+.upload-dropzone.drag-over {
+  background: rgba(249, 115, 22, 0.12);
+  border-color: rgba(249, 115, 22, 0.8);
+}
+
+.upload-dropzone input[type="file"] {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.upload-dropzone-text {
+  font-size: 0.92rem;
+  font-weight: 600;
+}
+
+.upload-filename {
+  margin-top: 2px;
+  word-break: break-all;
 }
 
 .hero-card {

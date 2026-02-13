@@ -70,6 +70,18 @@ const googleRefreshFilesBtn = document.getElementById("google-refresh-files");
 const googleSearchInput = document.getElementById("google-search");
 const googleFilesEl = document.getElementById("google-drive-files");
 const googleImportBtn = document.getElementById("google-import");
+const apiBaseInput = document.getElementById("api-base-input");
+const apiBaseApplyBtn = document.getElementById("api-base-apply");
+const apiBaseResetBtn = document.getElementById("api-base-reset");
+const uploadDropzone = document.getElementById("upload-dropzone");
+const uploadFilenameEl = document.getElementById("upload-filename");
+const uploadSessionInfoEl = document.getElementById("upload-session-info");
+const uploadCancelBtn = document.getElementById("upload-cancel");
+const uploadMetricsEl = document.getElementById("upload-metrics");
+const cancelCleanJobBtn = document.getElementById("cancel-clean-job");
+const downloadLinkCopyBtn = document.getElementById("download-link-copy");
+const qcCopyJsonBtn = document.getElementById("qc-copy-json");
+const qcDownloadJsonBtn = document.getElementById("qc-download-json");
 
 const previewCard = document.getElementById("preview-card");
 const previewFullscreenBtn = document.getElementById("preview-fullscreen");
@@ -79,9 +91,16 @@ const apiStatusEl = document.getElementById("api-status");
 const apiStatusDetailEl = document.getElementById("api-status-detail");
 
 let currentDataset = null;
+let currentQcPayload = null;
 let apiHealthy = false;
 let apiReachable = false;
 let apiService = "unknown";
+let apiBase = "";
+let currentUploadId = null;
+let currentCleanJobId = null;
+let activeUploadXhr = null;
+let uploadState = null;
+let uploadSessionPoller = null;
 let googleDriveConnected = false;
 let selectedGoogleFile = null;
 let googleSearchDebounce = null;
@@ -93,17 +112,89 @@ const CHUNK_SIZE = 10 * 1024 * 1024;
 const STREAMING_THRESHOLD_MB = 200;
 
 const DEFAULT_API_BASE = "http://localhost:8000";
+const API_BASE_STORAGE_KEY = "hc-data-cleanup-ai-api-base";
 const origin = window.location.origin;
 const isValidOrigin = origin && origin !== "null" && origin.startsWith("http");
-const API_BASE = isValidOrigin ? origin : DEFAULT_API_BASE;
-const API_PREFIX = `${API_BASE}/api`;
+const DEFAULT_ORIGIN_BASE = isValidOrigin ? origin : DEFAULT_API_BASE;
 
-function apiUrl(path) {
-  if (path.startsWith("/")) {
-    return `${API_PREFIX}${path}`;
+function normalizeApiBase(value) {
+  const raw = String(value || "").trim().replace(/\/+$/, "");
+  if (!raw) return "";
+  try {
+    const parsed = new URL(raw);
+    if (!["http:", "https:"].includes(parsed.protocol)) return "";
+    return `${parsed.protocol}//${parsed.host}`;
+  } catch (error) {
+    return "";
   }
-  return `${API_PREFIX}/${path}`;
 }
+
+function readStoredApiBase() {
+  try {
+    const value = localStorage.getItem(API_BASE_STORAGE_KEY);
+    const normalized = normalizeApiBase(value);
+    if (normalized) return normalized;
+  } catch (error) {
+    // LocalStorage may be blocked in some environments.
+  }
+  return "";
+}
+
+function writeStoredApiBase(value) {
+  try {
+    if (value) {
+      localStorage.setItem(API_BASE_STORAGE_KEY, value);
+    } else {
+      localStorage.removeItem(API_BASE_STORAGE_KEY);
+    }
+  } catch (error) {
+    // Ignore storage errors.
+  }
+}
+
+function refreshApiBaseFromStorage() {
+  const fromStorage = readStoredApiBase();
+  apiBase = fromStorage || DEFAULT_ORIGIN_BASE;
+  if (apiBaseInput) {
+    apiBaseInput.value = apiBase;
+  }
+}
+
+function updateApiUrls(base, { persist } = { persist: false }) {
+  const normalized = normalizeApiBase(base);
+  if (!normalized) {
+    throw new Error("Invalid API base URL. Use http://host:port or https://host:port.");
+  }
+  apiBase = normalized;
+  if (apiBaseInput) {
+    apiBaseInput.value = apiBase;
+  }
+  if (persist) {
+    writeStoredApiBase(apiBase);
+  }
+}
+
+let API_PREFIX = `${DEFAULT_ORIGIN_BASE}/api`;
+function apiUrl(path) {
+  if (!path.startsWith("/")) {
+    path = `/${path}`;
+  }
+  return `${API_PREFIX}${path}`;
+}
+
+function setApiBaseForSession(base, options) {
+  updateApiUrls(base, options || {});
+  API_PREFIX = `${apiBase}/api`;
+  checkApiHealth();
+}
+
+function resetApiBaseToDefault() {
+  writeStoredApiBase("");
+  setApiBaseForSession(DEFAULT_ORIGIN_BASE, { persist: false });
+}
+
+refreshApiBaseFromStorage();
+API_PREFIX = `${apiBase}/api`;
 
 function setViewMode(mode) {
   const resolved = mode === "advanced" ? "advanced" : "simple";
@@ -163,7 +254,7 @@ async function fetchFeatureCatalogStatus() {
 
 async function checkApiHealth() {
   if (!apiStatusEl) return;
-  apiStatusEl.textContent = `API: checking (${API_BASE})`;
+  apiStatusEl.textContent = `API: checking (${apiBase})`;
   apiStatusEl.classList.remove("ok", "warn");
   apiHealthy = false;
   apiReachable = false;
@@ -189,14 +280,14 @@ async function checkApiHealth() {
     apiStatusEl.classList.add(apiHealthy ? "ok" : "warn");
     if (!apiHealthy && apiStatusDetailEl) {
       apiStatusDetailEl.textContent =
-        `You are not connected to the HcDataCleanUpAi API. Open the app at ${DEFAULT_API_BASE} (or the port shown in your server logs) and refresh.`;
+        `You are not connected to the HcDataCleanUpAi API. Open the app at ${apiBase} and refresh.`;
     }
   } catch (error) {
     apiReachable = false;
     apiStatusEl.textContent = "API: unavailable";
     apiStatusEl.classList.add("warn");
     if (apiStatusDetailEl) {
-      apiStatusDetailEl.textContent = `Unable to reach ${DEFAULT_API_BASE}. Start the server and refresh.`;
+      apiStatusDetailEl.textContent = `Unable to reach ${apiBase}. Start the server and refresh.`;
     }
   }
 }
@@ -604,23 +695,141 @@ function updateUsageIntentNote() {
 }
 
 function setStatus(el, message) {
-  el.textContent = message;
+  if (el) {
+    el.textContent = message;
+  }
 }
 
-function setUploadProgress(percent) {
+function formatBytesPerSecond(value) {
+  if (!Number.isFinite(value) || value < 0) return "n/a";
+  const units = ["B/s", "KB/s", "MB/s", "GB/s", "TB/s"];
+  let size = value;
+  let unitIndex = 0;
+  while (size >= 1024 && unitIndex < units.length - 1) {
+    size /= 1024;
+    unitIndex += 1;
+  }
+  return `${size.toFixed(1)} ${units[unitIndex]}`;
+}
+
+function formatDurationFromMs(ms) {
+  if (!Number.isFinite(ms) || ms < 0) return "n/a";
+  const totalSeconds = Math.max(0, Math.round(ms / 1000));
+  const mins = Math.floor(totalSeconds / 60);
+  const secs = totalSeconds % 60;
+  if (mins > 0) {
+    return `${mins}m ${String(secs).padStart(2, "0")}s`;
+  }
+  return `${secs}s`;
+}
+
+function resetUploadUiState() {
+  currentUploadId = null;
+  uploadState = null;
+  if (uploadSessionPoller) {
+    clearInterval(uploadSessionPoller);
+    uploadSessionPoller = null;
+  }
+  if (uploadSessionInfoEl) {
+    uploadSessionInfoEl.textContent = "";
+  }
+  if (uploadCancelBtn) {
+    uploadCancelBtn.classList.add("hidden");
+    uploadCancelBtn.disabled = true;
+  }
+}
+
+function startUploadSessionPolling(uploadId) {
+  stopUploadSessionPolling();
+  if (!uploadId) return;
+  uploadSessionPoller = setInterval(async () => {
+    try {
+      const response = await fetch(apiUrl(`/uploads/${uploadId}`));
+      if (!response.ok) return;
+      const payload = await response.json();
+      if (!uploadSessionInfoEl || !uploadState) return;
+      const present = Number(payload.present_chunks || payload.present_count || 0) || 0;
+      const expected = Number(payload.expected_chunks || payload.total_chunks || 0) || 0;
+      const started = payload.created_at ? ` • Started ${payload.created_at}` : "";
+      uploadSessionInfoEl.textContent = `Upload session ${uploadId}: ${present}/${expected} chunks received${started}`;
+      if (payload.status === "completed" || payload.status === "cancelled") {
+        stopUploadSessionPolling();
+      }
+    } catch (error) {
+      // Polling failures are non-blocking UI only.
+    }
+  }, 1200);
+}
+
+function stopUploadSessionPolling() {
+  if (uploadSessionPoller) {
+    clearInterval(uploadSessionPoller);
+    uploadSessionPoller = null;
+  }
+}
+
+function refreshUploadState(uploadedBytes, totalBytes, message) {
+  if (!uploadState || !uploadState.startedAt) return;
+  const elapsedMs = Date.now() - uploadState.startedAt;
+  const elapsedText = formatDurationFromMs(elapsedMs);
+  const currentSpeed = uploadState.lastLoaded !== undefined && uploadState.lastTimestamp
+    ? Math.max(0, uploadedBytes - uploadState.lastLoaded) / Math.max(1, (Date.now() - uploadState.lastTimestamp) / 1000)
+    : 0;
+  const instantSpeed = formatBytesPerSecond(currentSpeed);
+  const avgSpeed = uploadedBytes > 0 ? (uploadedBytes / Math.max(0.001, elapsedMs / 1000)) : 0;
+  const avgSpeedText = formatBytesPerSecond(avgSpeed);
+  const remainingBytes = Math.max(0, totalBytes - uploadedBytes);
+  const eta = avgSpeed > 0 ? remainingBytes / avgSpeed : Infinity;
+  const etaText = eta === Infinity ? "n/a" : formatDurationFromMs(eta * 1000);
+  const baseMessage = message || `Upload progress: ${Math.min(100, Math.round((uploadedBytes / totalBytes) * 100))}%`;
+  if (uploadMetricsEl) {
+    uploadMetricsEl.textContent =
+      `${baseMessage} | ${formatBytes(uploadedBytes)} / ${formatBytes(totalBytes)} ` +
+      `| avg ${avgSpeedText}, peak ${instantSpeed} | ETA ${etaText} | elapsed ${elapsedText}`;
+  }
+  uploadState.lastLoaded = uploadedBytes;
+  uploadState.lastTimestamp = Date.now();
+}
+
+function setUploadProgress(percent, uploadedBytes, totalBytes, message) {
   const safePercent = Math.max(0, Math.min(100, percent));
   uploadProgressBar.style.width = `${safePercent}%`;
-  uploadProgressText.textContent = `Upload progress: ${safePercent}%`;
+  if (!uploadState) {
+    uploadState = {
+      startedAt: Date.now(),
+      lastLoaded: 0,
+      lastTimestamp: Date.now(),
+    };
+  }
+  const progressText = message || `Upload progress: ${safePercent}%`;
+  uploadProgressText.textContent = progressText;
+  if (typeof uploadedBytes === "number" && typeof totalBytes === "number" && totalBytes > 0) {
+    refreshUploadState(uploadedBytes, totalBytes, progressText);
+  } else if (uploadMetricsEl) {
+    uploadMetricsEl.textContent = `${progressText} | ${safePercent}%`;
+  }
 }
 
 function setCleanProgress(percent, message) {
   const safePercent = Math.max(0, Math.min(100, percent));
+  if (typeof setCleanProgress.startedAt !== "number" && safePercent > 0 && safePercent < 100) {
+    setCleanProgress.startedAt = Date.now();
+  }
+  if (safePercent >= 100) {
+    setCleanProgress.startedAt = null;
+  }
+  const elapsed = setCleanProgress.startedAt ? formatDurationFromMs(Date.now() - setCleanProgress.startedAt) : "0s";
   cleanProgressBar.style.width = `${safePercent}%`;
-  cleanProgressText.textContent = message ? `${message} (${safePercent}%)` : `Cleaning progress: ${safePercent}%`;
+  const cleanMessage = message
+    ? `${message} (${safePercent}%)`
+    : `Cleaning progress: ${safePercent}%`;
+  cleanProgressText.textContent = `${cleanMessage} (${elapsed} elapsed)`;
 }
+setCleanProgress.startedAt = null;
 
 
 function resetTables() {
+  currentQcPayload = null;
   profileTable.innerHTML = "";
   rawPreviewTable.innerHTML = "";
   previewRawTable.innerHTML = "";
@@ -633,6 +842,23 @@ function resetTables() {
   if (qcDownloadLink) {
     qcDownloadLink.classList.add("hidden");
     qcDownloadLink.removeAttribute("href");
+  }
+  if (qcCopyJsonBtn) {
+    qcCopyJsonBtn.disabled = true;
+  }
+if (qcDownloadJsonBtn) {
+    qcDownloadJsonBtn.disabled = true;
+  }
+  if (downloadLink) {
+    downloadLink.href = "#";
+    downloadLink.textContent = "Download cleaned file";
+  }
+  if (downloadLinkCopyBtn) {
+    downloadLinkCopyBtn.disabled = true;
+  }
+  if (cancelCleanJobBtn) {
+    cancelCleanJobBtn.classList.add("hidden");
+    cancelCleanJobBtn.disabled = true;
   }
   qcDetailsEl.textContent = "";
   qcSummaryEl.textContent = "";
@@ -1647,6 +1873,7 @@ function renderPreview(targetTable, preview) {
 }
 
 function renderQc(qc) {
+  currentQcPayload = qc || null;
   renderWhatChanged(qc);
   if (!qc) {
     qcDecisionEl.textContent = "";
@@ -1798,21 +2025,75 @@ async function fetchPreview(kind) {
   return response.json();
 }
 
+function updateUploadFilenameDisplay(file) {
+  if (!uploadFilenameEl) return;
+  if (!file) {
+    uploadFilenameEl.textContent = "";
+    return;
+  }
+  uploadFilenameEl.textContent = `${file.name} (${formatBytes(file.size)})`;
+}
+
+async function cancelActiveUpload() {
+  const uploadId = currentUploadId;
+  currentUploadId = null;
+  if (activeUploadXhr && activeUploadXhr.readyState !== 4) {
+    activeUploadXhr.abort();
+  }
+  stopUploadSessionPolling();
+  if (uploadId) {
+    try {
+      await fetch(apiUrl(`/uploads/${uploadId}`), { method: "DELETE" });
+    } catch (error) {
+      // best-effort cleanup.
+    }
+  }
+  if (uploadMetricsEl) {
+    uploadMetricsEl.textContent = "Upload cancelled.";
+  }
+  resetUploadUiState();
+  if (uploadProgressBar) {
+    uploadProgressBar.style.width = "0%";
+  }
+  if (uploadProgressText) {
+    uploadProgressText.textContent = "Upload cancelled.";
+  }
+}
+
 function uploadDataset(formData) {
   return new Promise((resolve, reject) => {
+    const file = formData.get("file");
+    const fileSize = file ? file.size : 0;
+    const total = Number(fileSize) || 0;
+    uploadState = {
+      startedAt: Date.now(),
+      lastLoaded: 0,
+      lastTimestamp: Date.now(),
+      totalBytes: total,
+      mode: "direct",
+    };
+    currentUploadId = null;
+    if (uploadCancelBtn) {
+      uploadCancelBtn.classList.remove("hidden");
+      uploadCancelBtn.disabled = false;
+      uploadCancelBtn.textContent = "Cancel Upload";
+    }
     const xhr = new XMLHttpRequest();
+    activeUploadXhr = xhr;
     xhr.open("POST", apiUrl("/datasets"), true);
 
     xhr.upload.addEventListener("progress", (event) => {
       if (event.lengthComputable) {
         const percent = Math.round((event.loaded / event.total) * 100);
-        setUploadProgress(percent);
+        setUploadProgress(percent, event.loaded, event.total, `Direct upload`);
       }
     });
 
     xhr.onload = () => {
+      activeUploadXhr = null;
       if (xhr.status >= 200 && xhr.status < 300) {
         try {
+          resetUploadUiState();
           resolve(JSON.parse(xhr.responseText));
         } catch (error) {
           reject(new Error("Upload succeeded but response parsing failed."));
@@ -1825,17 +2106,48 @@ function uploadDataset(formData) {
         } catch (error) {
           // ignore parse errors
         }
-        reject(new Error(message));
+        if (xhr.status === 0) {
+          reject(new Error("Upload cancelled."));
+        } else {
+          reject(new Error(message));
+        }
       }
     };
 
-    xhr.onerror = () => reject(new Error("Upload failed."));
+    xhr.onerror = () => {
+      activeUploadXhr = null;
+      reject(new Error("Upload failed."));
+    };
+    xhr.onabort = () => {
+      activeUploadXhr = null;
+      if (currentUploadId) {
+        cancelActiveUpload().catch(() => {});
+      }
+      reject(new Error("Upload cancelled."));
+    };
     xhr.send(formData);
   });
 }
 
 function uploadChunk(uploadId, index, chunk, uploadedSoFar, totalSize) {
   return new Promise((resolve, reject) => {
+    if (currentUploadId !== uploadId) {
+      reject(new Error("Upload session changed while uploading."));
+      return;
+    }
+    const chunkSize = chunk.size || 0;
+    const chunkState = {
+      startedAt: Date.now(),
+      lastLoaded: 0,
+      lastTimestamp: Date.now(),
+      totalBytes: totalSize,
+      mode: "chunked",
+    };
+    if (!uploadState) {
+      uploadState = chunkState;
+    } else if (uploadState.mode !== "chunked") {
+      uploadState = chunkState;
+    }
     const xhr = new XMLHttpRequest();
     const formData = new FormData();
     formData.append("index", index);
@@ -1844,10 +2156,15 @@ function uploadChunk(uploadId, index, chunk, uploadedSoFar, totalSize) {
     xhr.upload.addEventListener("progress", (event) => {
       if (event.lengthComputable) {
         const percent = Math.round(((uploadedSoFar + event.loaded) / totalSize) * 100);
-        setUploadProgress(percent);
+        setUploadProgress(percent, uploadedSoFar + event.loaded, totalSize, `Uploading chunk ${index + 1}`);
       }
     });
     xhr.onload = () => {
+      activeUploadXhr = null;
+      if (currentUploadId !== uploadId) {
+        reject(new Error("Upload session changed while uploading."));
+        return;
+      }
       if (xhr.status >= 200 && xhr.status < 300) {
         resolve();
       } else {
@@ -1858,16 +2175,34 @@ function uploadChunk(uploadId, index, chunk, uploadedSoFar, totalSize) {
         } catch (err) {
           // ignore parse errors
         }
-        reject(new Error(message));
+        if (xhr.status === 0) {
+          reject(new Error("Chunk upload cancelled."));
+        } else {
+          reject(new Error(message));
+        }
       }
     };
-    xhr.onerror = () => reject(new Error("Chunk upload failed."));
+    xhr.onerror = () => {
+      activeUploadXhr = null;
+      reject(new Error("Chunk upload failed."));
+    };
+    xhr.onabort = () => {
+      activeUploadXhr = null;
+      reject(new Error("Chunk upload cancelled."));
+    };
+    activeUploadXhr = xhr;
     xhr.send(formData);
   });
 }
 
 async function uploadDatasetWithChunks(file, meta) {
+  if (!file) {
+    throw new Error("No file selected.");
+  }
   const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+  if (!Number.isFinite(totalChunks) || totalChunks <= 0) {
+    throw new Error("Invalid upload chunk layout.");
+  }
   const startPayload = {
     filename: file.name,
     name: meta.name,
@@ -1896,29 +2231,65 @@ async function uploadDatasetWithChunks(file, meta) {
   }
   const startData = await startRes.json();
   const uploadId = startData.upload_id;
+  if (!uploadId) {
+    throw new Error("Chunked upload session did not return an upload id.");
+  }
+
+  currentUploadId = uploadId;
+  if (uploadSessionInfoEl) {
+    uploadSessionInfoEl.textContent = `Upload session ${uploadId} started (target chunks: ${totalChunks}).`;
+  }
+  if (uploadCancelBtn) {
+    uploadCancelBtn.classList.remove("hidden");
+    uploadCancelBtn.disabled = false;
+    uploadCancelBtn.textContent = "Cancel Upload";
+  }
+  uploadState = {
+    startedAt: Date.now(),
+    lastLoaded: 0,
+    lastTimestamp: Date.now(),
+    totalBytes: file.size,
+    mode: "chunked",
+  };
+  startUploadSessionPolling(uploadId);
 
   let uploadedSoFar = 0;
-  for (let index = 0; index < totalChunks; index += 1) {
-    const start = index * CHUNK_SIZE;
-    const end = Math.min(start + CHUNK_SIZE, file.size);
-    const chunk = file.slice(start, end);
-    await uploadChunk(uploadId, index, chunk, uploadedSoFar, file.size);
-    uploadedSoFar += chunk.size;
-    setUploadProgress(Math.round((uploadedSoFar / file.size) * 100));
-  }
-
-  const completeRes = await fetch(apiUrl(`/uploads/${uploadId}/complete`), { method: "POST" });
-  if (!completeRes.ok) {
-    let message = `Failed to finalize upload (${completeRes.status}) at ${completeRes.url}.`;
-    try {
-      const error = await completeRes.json();
-      message = error.detail || message;
-    } catch (err) {
-      // ignore parse errors
+  try {
+    for (let index = 0; index < totalChunks; index += 1) {
+      const start = index * CHUNK_SIZE;
+      const end = Math.min(start + CHUNK_SIZE, file.size);
+      const chunk = file.slice(start, end);
+      await uploadChunk(uploadId, index, chunk, uploadedSoFar, file.size);
+      uploadedSoFar += chunk.size;
+      setUploadProgress(Math.round((uploadedSoFar / file.size) * 100), uploadedSoFar, file.size, `Uploaded chunk ${index + 1}`);
+      if (!currentUploadId) {
+        throw new Error("Upload cancelled.");
+      }
     }
-    throw new Error(message);
+
+    const completeRes = await fetch(apiUrl(`/uploads/${uploadId}/complete`), { method: "POST" });
+    if (!completeRes.ok) {
+      let message = `Failed to finalize upload (${completeRes.status}) at ${completeRes.url}.`;
+      try {
+        const error = await completeRes.json();
+        message = error.detail || message;
+      } catch (err) {
+        // ignore parse errors
+      }
+      throw new Error(message);
+    }
+    const responsePayload = await completeRes.json();
+    stopUploadSessionPolling();
+    currentUploadId = null;
+    resetUploadUiState();
+    return responsePayload;
+  } catch (error) {
+    stopUploadSessionPolling();
+    if (currentUploadId) {
+      await cancelActiveUpload();
+    }
+    throw error;
   }
-  return completeRes.json();
 }
 
 function wait(ms) {
@@ -2007,6 +2378,7 @@ async function runSyncClean(datasetId, options) {
 }
 
 async function pollCleanJob(jobId) {
+  currentCleanJobId = jobId;
   while (true) {
     const response = await fetch(apiUrl(`/clean-jobs/${jobId}`));
     if (!response.ok) {
@@ -2016,15 +2388,31 @@ async function pollCleanJob(jobId) {
     }
     const job = await response.json();
     if (typeof job.progress === "number") {
-      setCleanProgress(job.progress, job.message);
+      const extra = job.cancel_requested ? "Cancel requested..." : "";
+      setCleanProgress(job.progress, extra ? `${job.message || "Processing"} | ${extra}` : job.message);
     }
     if (job.status === "completed") {
+      currentCleanJobId = null;
       return job.result;
     }
+    if (job.status === "cancelled" || job.status === "canceled") {
+      currentCleanJobId = null;
+      throw new Error("Cleaning canceled.");
+    }
     if (job.status === "failed") {
+      currentCleanJobId = null;
       throw new Error(job.error || "Cleaning failed.");
     }
     await wait(1000);
+  }
+}
+
+async function cancelCleanJob() {
+  if (!currentCleanJobId) return;
+  try {
+    await fetch(apiUrl(`/clean-jobs/${currentCleanJobId}/cancel`), { method: "POST" });
+  } catch (error) {
+    // best-effort.
   }
 }
 
@@ -2077,8 +2465,7 @@ async function handleDatasetReady(dataset, statusMessage) {
   refreshProfileBtn.disabled = false;
   previewFullscreenBtn.disabled = false;
   uploadButton.disabled = false;
-  downloadLink.href = "#";
-  downloadLink.textContent = "Download cleaned file";
+  setCleanOutputActions(false);
   optOutputFormat.value = currentDataset.output_format || "csv";
   optCoercionMode.value = "safe";
   optPrivacyMode.value = currentDataset.privacy_mode || "safe_harbor";
@@ -2087,6 +2474,47 @@ async function handleDatasetReady(dataset, statusMessage) {
   } else {
     setWizardStep(3);
   }
+}
+
+function setCleanOutputActions(enabled) {
+  const hasDataset = Boolean(currentDataset && currentDataset.id);
+  const hasLink = hasDataset && enabled;
+
+  if (downloadLink) {
+    if (hasLink) {
+      const downloadUrl = apiUrl(`/datasets/${currentDataset.id}/download?kind=cleaned`);
+      downloadLink.href = downloadUrl;
+      downloadLink.textContent = `Download cleaned ${currentDataset.output_format || "file"}`;
+      downloadLink.classList.remove("hidden");
+    } else {
+      downloadLink.href = "#";
+      downloadLink.textContent = "Download cleaned file";
+    }
+  }
+
+  if (downloadLinkCopyBtn) {
+    downloadLinkCopyBtn.disabled = !hasLink;
+  }
+  if (qcDownloadLink) {
+    if (hasLink) {
+      qcDownloadLink.href = apiUrl(`/datasets/${currentDataset.id}/download?kind=cleaned`);
+      qcDownloadLink.classList.remove("hidden");
+    } else {
+      qcDownloadLink.classList.add("hidden");
+      qcDownloadLink.removeAttribute("href");
+    }
+  }
+
+  if (qcCopyJsonBtn) {
+    qcCopyJsonBtn.disabled = !Boolean(currentQcPayload);
+  }
+if (qcDownloadJsonBtn) {
+    qcDownloadJsonBtn.disabled = !Boolean(currentQcPayload);
+  }
+}
+
+function isSupportedUploadFilename(name) {
+  return /\.(csv|tsv|jsonl|ndjson|parquet)$/i.test(String(name || ""));
 }
 
 uploadForm.addEventListener("submit", async (event) => {
@@ -2101,7 +2529,7 @@ uploadForm.addEventListener("submit", async (event) => {
   if (!apiHealthy) {
     setStatus(
       statusEl,
-      `API not ready (${apiService}). Open the app at ${DEFAULT_API_BASE} and refresh.`
+      `API not ready (${apiService}). Open the app at ${apiBase} and refresh.`
     );
     return;
   }
@@ -2113,14 +2541,27 @@ uploadForm.addEventListener("submit", async (event) => {
     output_format: outputFormatSelect.value,
     privacy_mode: optPrivacyMode.value,
   };
+  if (!isSupportedUploadFilename(file.name)) {
+    setStatus(statusEl, "Unsupported file type. Use CSV, TSV, JSONL, or Parquet.");
+    return;
+  }
 
   setStatus(statusEl, "Analyzing your dataset...");
+  updateUploadFilenameDisplay(file);
   resetTables();
-  setUploadProgress(0);
+  setUploadProgress(0, 0, file.size, "Preparing upload");
+  if (uploadMetricsEl) {
+    uploadMetricsEl.textContent = `Preparing to upload ${file.name} (${formatBytes(file.size)})`;
+  }
   uploadButton.disabled = true;
   runCleaningBtn.disabled = true;
   refreshProfileBtn.disabled = true;
   previewFullscreenBtn.disabled = true;
+  if (uploadCancelBtn) {
+    uploadCancelBtn.classList.remove("hidden");
+    uploadCancelBtn.disabled = false;
+    uploadCancelBtn.textContent = "Cancel Upload";
+  }
 
   const formData = new FormData();
   formData.append("file", file);
@@ -2139,7 +2580,7 @@ uploadForm.addEventListener("submit", async (event) => {
         if (error.status === 404 || error.status === 405) {
           if (file.size > STREAMING_THRESHOLD_MB * 1024 * 1024) {
             throw new Error(
-              `Chunked upload endpoint unavailable at ${API_BASE}. For large files, open the app at ${DEFAULT_API_BASE} and refresh.`
+              `Chunked upload endpoint unavailable at ${apiBase}. For large files, open the app at ${apiBase} and refresh.`
             );
           }
           currentDataset = await uploadDataset(formData);
@@ -2150,13 +2591,42 @@ uploadForm.addEventListener("submit", async (event) => {
     } else {
       currentDataset = await uploadDataset(formData);
     }
-    setUploadProgress(100);
+    setUploadProgress(100, file.size, file.size, "Upload complete");
+    if (uploadMetricsEl) {
+      uploadMetricsEl.textContent = `Upload complete • ${formatBytes(file.size)} total`;
+    }
+    if (uploadCancelBtn) {
+      uploadCancelBtn.classList.add("hidden");
+      uploadCancelBtn.disabled = true;
+    }
+    if (uploadSessionInfoEl) {
+      uploadSessionInfoEl.textContent = "";
+    }
   } catch (error) {
     setStatus(statusEl, error.message || "Upload failed.");
+    if (uploadCancelBtn) {
+      uploadCancelBtn.classList.add("hidden");
+      uploadCancelBtn.disabled = true;
+    }
+    resetUploadUiState();
+    if (/cancel|aborted/i.test(String(error.message || ""))) {
+      resetUploadUiState();
+      setStatus(statusEl, "Upload canceled.");
+    }
+  } finally {
     uploadButton.disabled = false;
-    return;
+    runCleaningBtn.disabled = false;
+    refreshProfileBtn.disabled = false;
+    previewFullscreenBtn.disabled = false;
+    if (!currentDataset) {
+      runCleaningBtn.disabled = true;
+      refreshProfileBtn.disabled = true;
+      previewFullscreenBtn.disabled = true;
+    }
   }
-  await handleDatasetReady(currentDataset, `Analysis complete for ${currentDataset.name}.`);
+  if (currentDataset) {
+    await handleDatasetReady(currentDataset, `Analysis complete for ${currentDataset.name}.`);
+  }
 });
 
 if (runAutopilotBtn) {
@@ -2165,7 +2635,7 @@ if (runAutopilotBtn) {
     if (!apiHealthy) {
       setStatus(
         cleanStatusEl,
-        `API not ready (${apiService}). Open the app at ${DEFAULT_API_BASE} and refresh.`
+        `API not ready (${apiService}). Open the app at ${apiBase} and refresh.`
       );
       return;
     }
@@ -2174,6 +2644,10 @@ if (runAutopilotBtn) {
     runAutopilotBtn.disabled = true;
     runCleaningBtn.disabled = true;
     uploadButton.disabled = true;
+    if (cancelCleanJobBtn) {
+      cancelCleanJobBtn.classList.add("hidden");
+      cancelCleanJobBtn.disabled = true;
+    }
 
     try {
       setCleanProgress(0, "Starting autopilot");
@@ -2210,8 +2684,7 @@ if (runAutopilotBtn) {
       );
       setWizardStep(4);
 
-      downloadLink.href = apiUrl(`/datasets/${currentDataset.id}/download?kind=cleaned`);
-      downloadLink.textContent = `Download cleaned ${currentDataset.output_format || "file"}`;
+      setCleanOutputActions(true);
     } catch (error) {
       setStatus(cleanStatusEl, error.message || "Autopilot cleanup failed.");
       setCleanProgress(0, "Failed");
@@ -2219,6 +2692,10 @@ if (runAutopilotBtn) {
       runAutopilotBtn.disabled = false;
       runCleaningBtn.disabled = false;
       uploadButton.disabled = false;
+      if (cancelCleanJobBtn) {
+        cancelCleanJobBtn.classList.add("hidden");
+        cancelCleanJobBtn.disabled = true;
+      }
     }
   });
 }
@@ -2228,7 +2705,7 @@ runCleaningBtn.addEventListener("click", async () => {
   if (!apiHealthy) {
     setStatus(
       cleanStatusEl,
-      `API not ready (${apiService}). Open the app at ${DEFAULT_API_BASE} and refresh.`
+      `API not ready (${apiService}). Open the app at ${apiBase} and refresh.`
     );
     return;
   }
@@ -2237,6 +2714,10 @@ runCleaningBtn.addEventListener("click", async () => {
   runCleaningBtn.disabled = true;
   if (runAutopilotBtn) runAutopilotBtn.disabled = true;
   uploadButton.disabled = true;
+  if (cancelCleanJobBtn) {
+    cancelCleanJobBtn.classList.remove("hidden");
+    cancelCleanJobBtn.disabled = false;
+  }
 
   const options = {
     remove_duplicates: document.getElementById("opt-dedup").checked,
@@ -2256,13 +2737,17 @@ runCleaningBtn.addEventListener("click", async () => {
     let result = null;
     try {
       const job = await startCleanJob(currentDataset.id, options);
+      if (cancelCleanJobBtn) {
+        cancelCleanJobBtn.disabled = false;
+        cancelCleanJobBtn.textContent = "Cancel Cleaning Job";
+      }
       result = await pollCleanJob(job.id);
     } catch (error) {
       if (error.status === 404 || error.status === 405) {
         const sizeBytes = currentDataset.file_size_bytes || 0;
         if (sizeBytes > STREAMING_THRESHOLD_MB * 1024 * 1024) {
           throw new Error(
-            `Cleaning job endpoint unavailable at ${API_BASE}. For large files, open the app at ${DEFAULT_API_BASE} and refresh.`
+            `Cleaning job endpoint unavailable at ${apiBase}. For large files, open the app at ${apiBase} and refresh.`
           );
         }
         result = await runSyncClean(currentDataset.id, options);
@@ -2278,19 +2763,23 @@ runCleaningBtn.addEventListener("click", async () => {
     setCleanProgress(100, "Completed");
     setStatus(cleanStatusEl, "Cleanup complete. Your dataset is ready to download.");
     setWizardStep(4);
-    downloadLink.href = apiUrl(`/datasets/${currentDataset.id}/download?kind=cleaned`);
-    downloadLink.textContent = `Download cleaned ${currentDataset.output_format || "file"}`;
-    runCleaningBtn.disabled = false;
+    setCleanOutputActions(true);
     if (runAutopilotBtn) runAutopilotBtn.disabled = false;
     uploadButton.disabled = false;
+    runCleaningBtn.disabled = false;
     return;
   } catch (error) {
     setStatus(cleanStatusEl, error.message || "Cleaning failed.");
     setCleanProgress(0, "Failed");
-    runCleaningBtn.disabled = false;
     if (runAutopilotBtn) runAutopilotBtn.disabled = false;
     uploadButton.disabled = false;
+    runCleaningBtn.disabled = false;
     return;
+  } finally {
+    if (cancelCleanJobBtn) {
+      cancelCleanJobBtn.classList.add("hidden");
+      cancelCleanJobBtn.disabled = true;
+    }
   }
 });
 
@@ -2327,6 +2816,7 @@ refreshProfileBtn.addEventListener("click", async () => {
     await refreshRunHistory();
     setStatus(statusEl, `View refreshed for ${dataset.name}.`);
     setWizardStep(dataset.qc ? 4 : 3);
+    setCleanOutputActions(Boolean(dataset.qc));
   } else {
     setStatus(statusEl, "Failed to refresh view.");
   }
@@ -2376,6 +2866,195 @@ if (googleImportBtn) {
     await runGoogleImportFlow();
   });
 }
+
+if (datasetFileInput) {
+  datasetFileInput.addEventListener("change", () => {
+    const file = datasetFileInput.files && datasetFileInput.files[0];
+    updateUploadFilenameDisplay(file || null);
+  });
+}
+
+if (uploadDropzone) {
+  uploadDropzone.addEventListener("dragover", (event) => {
+    event.preventDefault();
+    uploadDropzone.classList.add("drag-over");
+  });
+
+  uploadDropzone.addEventListener("dragleave", (event) => {
+    event.preventDefault();
+    uploadDropzone.classList.remove("drag-over");
+  });
+
+  uploadDropzone.addEventListener("drop", (event) => {
+    event.preventDefault();
+    uploadDropzone.classList.remove("drag-over");
+    const droppedFiles = event.dataTransfer && event.dataTransfer.files;
+    if (!droppedFiles || !droppedFiles.length) {
+      return;
+    }
+    const file = droppedFiles[0];
+    if (file) {
+      if (datasetFileInput) {
+        datasetFileInput.files = droppedFiles;
+        updateUploadFilenameDisplay(file);
+      }
+      setStatus(statusEl, "File selected. Click Upload and Analyze to start.");
+    }
+  });
+}
+
+if (uploadCancelBtn) {
+  uploadCancelBtn.addEventListener("click", async () => {
+    await cancelActiveUpload();
+    setUploadProgress(0, 0, uploadState?.totalBytes || 0, "Upload cancelled");
+  });
+}
+
+if (cancelCleanJobBtn) {
+  cancelCleanJobBtn.addEventListener("click", async () => {
+    cancelCleanJobBtn.disabled = true;
+    setCleanProgress.startedAt = null;
+    setCleanProgress(0, "Cancel requested...");
+    await cancelCleanJob();
+  });
+}
+
+if (downloadLinkCopyBtn) {
+  downloadLinkCopyBtn.addEventListener("click", async () => {
+    if (!downloadLink || !downloadLink.href || downloadLink.href.endsWith("#")) {
+      setStatus(statusEl, "Cleaned download is not ready yet.");
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(downloadLink.href);
+      setStatus(statusEl, "Download URL copied.");
+    } catch (error) {
+      setStatus(statusEl, "Could not copy URL. Select and copy manually.");
+    }
+  });
+}
+
+if (qcCopyJsonBtn) {
+  qcCopyJsonBtn.addEventListener("click", async () => {
+    if (!currentQcPayload) {
+      setStatus(statusEl, "No QC payload available.");
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(JSON.stringify(currentQcPayload, null, 2));
+      setStatus(statusEl, "QC JSON copied.");
+    } catch (error) {
+      setStatus(statusEl, "Unable to copy QC JSON.");
+    }
+  });
+}
+
+  if (qcDownloadJsonBtn) {
+  qcDownloadJsonBtn.addEventListener("click", () => {
+    if (!currentQcPayload) {
+      setStatus(statusEl, "No QC payload available.");
+      return;
+    }
+    const payload = JSON.stringify(currentQcPayload, null, 2);
+    const blob = new Blob([payload], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    const datasetName = ((currentDataset && currentDataset.name) || "dataset")
+      .toString()
+      .replace(/[^a-z0-9-_]+/gi, "_")
+      .slice(0, 40) || "dataset";
+    anchor.download = `${datasetName}-qc.json`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+  });
+}
+
+if (apiBaseApplyBtn && apiBaseInput) {
+  apiBaseApplyBtn.addEventListener("click", () => {
+    const candidate = apiBaseInput.value;
+    try {
+      setApiBaseForSession(candidate, { persist: true });
+      setStatus(statusEl, `API base set to ${apiBase}. Rechecking endpoint...`);
+      checkApiHealth();
+    } catch (error) {
+      setStatus(apiStatusEl, error.message || "Invalid API base.");
+    }
+  });
+}
+
+if (apiBaseResetBtn) {
+  apiBaseResetBtn.addEventListener("click", () => {
+    resetApiBaseToDefault();
+    setStatus(statusEl, `API base reset to ${apiBase}. Rechecking endpoint...`);
+    checkApiHealth();
+  });
+}
+
+if (apiBaseInput) {
+  apiBaseInput.value = apiBase;
+  apiBaseInput.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      apiBaseApplyBtn?.click();
+    }
+  });
+}
+
+window.addEventListener("keydown", (event) => {
+  if ((event.target && /INPUT|TEXTAREA|SELECT/.test(event.target.tagName))) {
+    return;
+  }
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "u") {
+    event.preventDefault();
+    if (datasetFileInput) {
+      datasetFileInput.click();
+    }
+    return;
+  }
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "enter") {
+    event.preventDefault();
+    if (uploadForm) {
+      uploadForm.requestSubmit();
+    }
+    return;
+  }
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "r") {
+    event.preventDefault();
+    if (currentDataset && refreshProfileBtn && !refreshProfileBtn.disabled) {
+      refreshProfileBtn.click();
+    }
+    return;
+  }
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k" && runCleaningBtn && !runCleaningBtn.disabled) {
+    event.preventDefault();
+    runCleaningBtn.click();
+    return;
+  }
+  if (
+    (event.ctrlKey || event.metaKey) &&
+    event.shiftKey &&
+    event.key.toLowerCase() === "a" &&
+    runAutopilotBtn &&
+    !runAutopilotBtn.disabled
+  ) {
+    event.preventDefault();
+    runAutopilotBtn.click();
+    return;
+  }
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "g") {
+    event.preventDefault();
+    if (downloadLink) {
+      downloadLinkCopyBtn?.click();
+    }
+  }
+  if (event.key === "Escape") {
+    setFullscreen(false);
+  }
+  if (event.key === "F11") {
+    setFullscreen(true);
+  }
+});
 
 usageIntentSelect.addEventListener("change", updateUsageIntentNote);
 if (viewModeSelect) {

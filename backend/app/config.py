@@ -8,6 +8,8 @@ DATA_DIR = BASE_DIR / "data"
 RAW_DIR = DATA_DIR / "raw"
 CLEANED_DIR = DATA_DIR / "cleaned"
 DB_PATH = DATA_DIR / "app.db"
+APP_VERSION = "0.3.0"
+ALLOWED_ORIGINS = "*"
 
 
 def _load_dotenv_file(path: Path) -> None:
@@ -38,6 +40,9 @@ def _load_dotenv_file(path: Path) -> None:
 
 for _env_path in (BASE_DIR / ".env", BASE_DIR / "backend" / ".env"):
     _load_dotenv_file(_env_path)
+
+APP_VERSION = os.getenv("APP_VERSION", APP_VERSION)
+ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", ALLOWED_ORIGINS)
 
 MAX_UPLOAD_MB = 2048
 STREAMING_THRESHOLD_MB = 200

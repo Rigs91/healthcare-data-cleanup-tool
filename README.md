@@ -2,6 +2,9 @@
 
 A working MVP that ingests messy healthcare datasets, profiles the columns, runs a cleaning engine, and outputs AI- and RAG-ready cleaned data.
 
+## Product Documentation
+For the current roadmap and V2 direction, see [`VERSION_2_0_PRD.md`](VERSION_2_0_PRD.md).
+
 ## Tech Stack
 - Backend: `FastAPI` + `pandas` + `SQLAlchemy` (SQLite)
 - Frontend: Static HTML/CSS/JS served by FastAPI

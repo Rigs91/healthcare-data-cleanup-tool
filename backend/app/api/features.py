@@ -16,7 +16,7 @@ async def get_feature_registry(
     features = list(registry.get("features") or [])
 
     if wave is not None:
-        features = [item for item in features if int(item.get("wave") or -1) == wave]
+        features = [item for item in features if _safe_int(item.get("wave")) == wave]
     if status:
         needle = status.strip().lower()
         features = [item for item in features if str(item.get("status") or "").lower() == needle]
@@ -25,3 +25,9 @@ async def get_feature_registry(
     registry["summary"]["filtered_total"] = len(features)
     return registry
 
+
+def _safe_int(value) -> int | None:
+    try:
+        return int(value)
+    except Exception:
+        return None

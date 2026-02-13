@@ -3,7 +3,7 @@ import re
 import time
 from pathlib import Path
 from threading import Thread
-from typing import Any
+from typing import Any, Callable
 from uuid import uuid4
 
 import pandas as pd
@@ -13,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
 from app.config import (
+    APP_VERSION,
     CLEANED_DIR,
     CSV_CHUNK_SIZE,
     CSV_CHUNK_SIZE_FAST,
@@ -29,7 +30,15 @@ from app.db.models import CleanRun, Dataset
 from app.db.session import SessionLocal
 from app.schemas.dataset import DatasetBase, DatasetDetail, DatasetList
 from app.services.cleaning import MISSING_VALUES_LOWER, clean_dataframe, standardize_columns
-from app.services.jobs import create_job, fail_job, finish_job, get_job, update_job
+from app.services.jobs import (
+    create_job,
+    fail_job,
+    finish_job,
+    get_job,
+    is_job_cancel_requested,
+    request_job_cancel,
+    update_job,
+)
 from app.services.outcomes import build_postclean_decision, evaluate_outcomes
 from app.services.profiling import build_profile, infer_hints_from_profile
 from app.services.qc import build_qc_report, build_streaming_qc_report
@@ -37,10 +46,17 @@ from app.services.rag_readiness import (
     build_rag_readiness_comparison,
     build_rag_readiness_from_dataframe,
 )
-from app.services.runs import complete_clean_run, create_clean_run, fail_clean_run, run_to_dict
+from app.services.runs import (
+    cancel_clean_run,
+    complete_clean_run,
+    create_clean_run,
+    fail_clean_run,
+    run_to_dict,
+)
 from app.services.storage import (
     detect_file_type,
     estimate_row_count,
+    is_supported_filename,
     read_dataframe,
     save_upload_to_disk,
 )
@@ -51,6 +67,10 @@ router = APIRouter(prefix="/api", tags=["datasets"])
 
 UPLOAD_DIR = RAW_DIR / "_uploads"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
+
+class _JobCancelled(RuntimeError):
+    """Raised when an async clean job receives a cancellation request."""
 
 
 class CleaningOptions(BaseModel):
@@ -113,6 +133,90 @@ def _deserialize_json(value: str | None) -> Any:
     if not value:
         return None
     return json.loads(value)
+
+
+def _upload_meta_path(upload_id: str) -> Path:
+    return UPLOAD_DIR / f"{upload_id}.json"
+
+
+def _upload_session_path(upload_id: str) -> Path:
+    return UPLOAD_DIR / upload_id
+
+
+def _sanitize_filename(filename: str) -> str:
+    return Path(filename).name.replace("..", ".").replace("/", "_").replace("\\", "_")
+
+
+def _load_upload_meta(upload_id: str) -> dict[str, Any]:
+    meta_path = _upload_meta_path(upload_id)
+    if not meta_path.exists():
+        raise HTTPException(status_code=404, detail="Upload session not found")
+    try:
+        payload = json.loads(meta_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="Upload metadata is invalid.") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Upload metadata is invalid.")
+    filename = payload.get("filename")
+    if not filename or not isinstance(filename, str):
+        raise HTTPException(status_code=400, detail="Upload metadata is missing a filename.")
+    if not is_supported_filename(filename):
+        raise HTTPException(status_code=400, detail="Unsupported file type for upload session.")
+    total_chunks = payload.get("total_chunks")
+    if not isinstance(total_chunks, int) or total_chunks <= 0:
+        raise HTTPException(status_code=400, detail="Upload metadata is missing total_chunks.")
+    file_size = payload.get("file_size")
+    if not isinstance(file_size, int) or file_size < 0:
+        raise HTTPException(status_code=400, detail="Upload metadata contains invalid file size.")
+    if total_chunks > 1 and file_size == 0:
+        raise HTTPException(status_code=400, detail="Chunked upload requires non-zero file size.")
+    return payload
+
+
+def _cleanup_upload_session(upload_id: str) -> None:
+    upload_path = _upload_session_path(upload_id)
+    if upload_path.exists():
+        for part in upload_path.glob("*"):
+            if part.is_file():
+                part.unlink(missing_ok=True)
+        upload_path.rmdir()
+    meta_path = _upload_meta_path(upload_id)
+    meta_path.unlink(missing_ok=True)
+
+
+def _upload_session_state(meta: dict[str, Any], upload_path: Path | None = None) -> dict[str, Any]:
+    chunks: list[int] = []
+    total_chunks = int(meta.get("total_chunks") or 0)
+    uploaded_chunks = 0
+    uploaded_bytes = 0
+    if upload_path is None:
+        upload_path = _upload_session_path(str(meta.get("upload_id", "")))
+
+    if upload_path.exists():
+        part_files = sorted([entry for entry in upload_path.glob("part_*") if entry.is_file()])
+        for part in part_files:
+            index_text = part.name.removeprefix("part_")
+            if len(index_text) != 6 or not index_text.isdigit():
+                continue
+            idx = int(index_text)
+            chunks.append(idx)
+            uploaded_bytes += part.stat().st_size
+        uploaded_chunks = len(chunks)
+
+    return {
+        "upload_id": meta.get("upload_id"),
+        "filename": meta.get("filename"),
+        "name": meta.get("name"),
+        "usage_intent": meta.get("usage_intent"),
+        "output_format": meta.get("output_format"),
+        "privacy_mode": meta.get("privacy_mode"),
+        "file_size": meta.get("file_size"),
+        "total_chunks": total_chunks,
+        "uploaded_chunks": uploaded_chunks,
+        "received_indices": sorted(chunks),
+        "uploaded_bytes": uploaded_bytes,
+        "is_complete": total_chunks and uploaded_chunks >= total_chunks,
+    }
 
 
 def _to_preview(df, *, limit: int = 50, row_count: int | None = None) -> dict:
@@ -179,6 +283,10 @@ def _create_dataset_from_path(
     source_type: str = "file_upload",
     source_details: dict[str, Any] | None = None,
 ) -> Dataset:
+    if not is_supported_filename(filename):
+        saved_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=400, detail="Unsupported file extension.")
+
     file_type = detect_file_type(filename)
     size_mb = size_bytes / (1024 * 1024)
     if size_mb > MAX_UPLOAD_MB:
@@ -490,6 +598,7 @@ def _perform_cleaning_with_run(
     db: Session,
     *,
     progress_callback=None,
+    cancel_check: Callable[[], bool] | None = None,
 ) -> dict:
     profile = _deserialize_json(dataset.profile_json) or {}
     assessment = profile.get("assessment") if isinstance(profile, dict) else None
@@ -511,8 +620,14 @@ def _perform_cleaning_with_run(
     )
 
     started = time.perf_counter()
+    def _guarded_progress_callback(pct: int, message: str) -> None:
+        if cancel_check and cancel_check():
+            raise _JobCancelled("Cleaning was canceled.")
+        if progress_callback:
+            progress_callback(pct, message)
+
     try:
-        result = _perform_cleaning(dataset, options, db, progress_callback=progress_callback)
+        result = _perform_cleaning(dataset, options, db, progress_callback=_guarded_progress_callback)
         duration_ms = int((time.perf_counter() - started) * 1000)
         qc_report = result.get("qc") or {}
         rag_after = qc_report.get("rag_readiness") if isinstance(qc_report, dict) else None
@@ -554,6 +669,14 @@ def _perform_cleaning_with_run(
         result["run"] = run_to_dict(run)
         result["dataset"] = _dataset_to_detail(dataset, db=db, latest_run=run)
         return result
+    except _JobCancelled:
+        cancel_clean_run(
+            db=db,
+            run=run,
+            error_message="Cleaning canceled by user request.",
+            duration_ms=int((time.perf_counter() - started) * 1000),
+        )
+        raise
     except Exception as exc:
         duration_ms = int((time.perf_counter() - started) * 1000)
         fail_clean_run(db=db, run=run, error_message=str(exc), duration_ms=duration_ms)
@@ -1153,7 +1276,7 @@ def _run_autopilot_for_dataset(
 
 @router.get("/health")
 async def health() -> dict:
-    return {"status": "ok", "service": "hc-data-cleanup-ai", "version": "0.3.0"}
+    return {"status": "ok", "service": "hc-data-cleanup-ai", "version": APP_VERSION}
 
 
 @router.get("/datasets", response_model=DatasetList)
@@ -1191,13 +1314,18 @@ async def create_dataset(
     privacy_mode: str | None = Form(None),
     db: Session = Depends(get_db),
 ) -> DatasetDetail:
+    filename = (file.filename or "").strip()
+    if not filename:
+        raise HTTPException(status_code=400, detail="Filename is required.")
+    if not is_supported_filename(filename):
+        raise HTTPException(status_code=400, detail="Unsupported file extension.")
     dataset_id = uuid4().hex
-    saved_path, size_bytes = save_upload_to_disk(file.file, file.filename, dataset_id)
+    saved_path, size_bytes = save_upload_to_disk(file.file, filename, dataset_id)
     dataset = _create_dataset_from_path(
         db=db,
         dataset_id=dataset_id,
         saved_path=saved_path,
-        filename=file.filename,
+        filename=filename,
         size_bytes=size_bytes,
         name=name,
         usage_intent=usage_intent,
@@ -1224,10 +1352,21 @@ async def create_dataset_from_google_drive(
 
 @router.post("/uploads/start")
 async def start_upload(payload: UploadStart) -> dict:
+    filename = payload.filename.strip()
+    if not filename:
+        raise HTTPException(status_code=400, detail="filename is required")
+    if not is_supported_filename(filename):
+        raise HTTPException(status_code=400, detail="Unsupported file extension.")
+    if payload.total_chunks <= 0:
+        raise HTTPException(status_code=400, detail="total_chunks must be >= 1")
+    if payload.file_size < 0:
+        raise HTTPException(status_code=400, detail="file_size must be >= 0")
     upload_id = uuid4().hex
     meta = payload.model_dump()
     meta["upload_id"] = upload_id
-    meta_path = UPLOAD_DIR / f"{upload_id}.json"
+    meta["filename"] = _sanitize_filename(filename)
+    meta["created_at"] = time.time()
+    meta_path = _upload_meta_path(upload_id)
     meta_path.write_text(json.dumps(meta), encoding="utf-8")
     return {"upload_id": upload_id}
 
@@ -1243,16 +1382,45 @@ async def upload_chunk(
     index: int = Form(...),
     chunk: UploadFile = File(...),
 ) -> dict:
-    upload_path = UPLOAD_DIR / upload_id
+    meta = _load_upload_meta(upload_id)
+    total_chunks = int(meta.get("total_chunks") or 0)
+    if not isinstance(index, int):
+        raise HTTPException(status_code=400, detail="index must be an integer")
+    if index < 0 or (total_chunks and index >= total_chunks):
+        raise HTTPException(status_code=400, detail="Chunk index is out of range for upload session.")
+
+    upload_path = _upload_session_path(upload_id)
     upload_path.mkdir(parents=True, exist_ok=True)
     part_path = upload_path / f"part_{index:06d}"
+
+    data = chunk.file.read()
+    if data is None or len(data) == 0:
+        raise HTTPException(status_code=400, detail="Uploaded chunk is empty.")
+    if part_path.exists() and part_path.stat().st_size == len(data):
+        return {"status": "ok", "duplicate": True, "index": index}
+
     with part_path.open("wb") as handle:
-        while True:
-            data = chunk.file.read(1024 * 1024)
-            if not data:
-                break
-            handle.write(data)
-    return {"status": "ok"}
+        handle.write(data)
+    return {"status": "ok", "duplicate": False, "index": index}
+
+
+@router.get("/uploads/{upload_id}")
+async def get_upload_session(upload_id: str) -> dict:
+    meta = _load_upload_meta(upload_id)
+    upload_path = _upload_session_path(upload_id)
+    state = _upload_session_state(meta, upload_path=upload_path)
+    return state
+
+
+@router.delete("/uploads/{upload_id}")
+async def cancel_upload_session(upload_id: str) -> dict:
+    meta = _load_upload_meta(upload_id)
+    _cleanup_upload_session(upload_id)
+    return {
+        "status": "ok",
+        "upload_id": upload_id,
+        "filename": meta.get("filename"),
+    }
 
 
 @router.options("/uploads/{upload_id}/chunk")
@@ -1262,52 +1430,74 @@ async def options_upload_chunk(upload_id: str) -> dict:
 
 @router.post("/uploads/{upload_id}/complete", response_model=DatasetDetail)
 async def complete_upload(upload_id: str, db: Session = Depends(get_db)) -> DatasetDetail:
-    meta_path = UPLOAD_DIR / f"{upload_id}.json"
-    if not meta_path.exists():
-        raise HTTPException(status_code=404, detail="Upload session not found")
-    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    meta = _load_upload_meta(upload_id)
 
-    upload_path = UPLOAD_DIR / upload_id
+    upload_path = _upload_session_path(upload_id)
     if not upload_path.exists():
         raise HTTPException(status_code=400, detail="No chunks uploaded")
 
-    total_chunks = meta.get("total_chunks") or 0
+    total_chunks = int(meta.get("total_chunks") or 0)
     parts = sorted(upload_path.glob("part_*"))
-    if total_chunks and len(parts) != total_chunks:
-        raise HTTPException(status_code=400, detail="Missing chunks")
+    if total_chunks <= 0:
+        raise HTTPException(status_code=400, detail="Invalid chunk session.")
+    expected_parts = [f"part_{i:06d}" for i in range(total_chunks)]
+    present_parts = [part.name for part in parts if re.match(r"^part_\d{6}$", part.name)]
 
-    safe_name = meta["filename"].replace("..", ".").replace("/", "_").replace("\\", "_")
+    expected_set = set(expected_parts)
+    present_set = set(present_parts)
+    missing_parts = sorted(expected_set - present_set)
+    unexpected_parts = sorted(present_set - expected_set)
+
+    if missing_parts or unexpected_parts:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "UPLOAD_CHUNKS_INVALID",
+                "message": "Upload chunks are incomplete or invalid.",
+                "missing": missing_parts[:100],
+                "unexpected": unexpected_parts[:100],
+            },
+        )
+
+    safe_name = _sanitize_filename(meta["filename"])
     dataset_id = uuid4().hex
     final_path = RAW_DIR / f"{dataset_id}__{safe_name}"
 
-    with final_path.open("wb") as out:
-        for part in sorted(parts):
-            out.write(part.read_bytes())
-
-    size_bytes = final_path.stat().st_size
-    expected_size = meta.get("file_size")
-    if expected_size and size_bytes != expected_size:
-        final_path.unlink(missing_ok=True)
+    expected_size = int(meta.get("file_size") or 0)
+    state = _upload_session_state(meta, upload_path=upload_path)
+    if expected_size and expected_size != state["uploaded_bytes"]:
         raise HTTPException(
             status_code=400,
-            detail=f"Upload size mismatch (expected {expected_size} bytes, got {size_bytes} bytes).",
+            detail=f"Upload chunk size mismatch (expected {expected_size} bytes by metadata, got {state['uploaded_bytes']} bytes).",
         )
-    dataset = _create_dataset_from_path(
-        db=db,
-        dataset_id=dataset_id,
-        saved_path=final_path,
-        filename=meta["filename"],
-        size_bytes=size_bytes,
-        name=meta.get("name"),
-        usage_intent=meta.get("usage_intent"),
-        output_format=meta.get("output_format"),
-        privacy_mode=meta.get("privacy_mode"),
-    )
 
-    for part in parts:
-        part.unlink(missing_ok=True)
-    upload_path.rmdir()
-    meta_path.unlink(missing_ok=True)
+    try:
+        with final_path.open("wb") as out:
+            for index in expected_parts:
+                out.write((upload_path / index).read_bytes())
+
+        size_bytes = final_path.stat().st_size
+        if expected_size and size_bytes != expected_size:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Upload size mismatch (expected {expected_size} bytes, got {size_bytes} bytes).",
+            )
+        dataset = _create_dataset_from_path(
+            db=db,
+            dataset_id=dataset_id,
+            saved_path=final_path,
+            filename=meta["filename"],
+            size_bytes=size_bytes,
+            name=meta.get("name"),
+            usage_intent=meta.get("usage_intent"),
+            output_format=meta.get("output_format"),
+            privacy_mode=meta.get("privacy_mode"),
+        )
+    except Exception:
+        final_path.unlink(missing_ok=True)
+        raise
+    finally:
+        _cleanup_upload_session(upload_id)
 
     return _dataset_to_detail(dataset, db=db)
 
@@ -1373,12 +1563,25 @@ def _run_clean_job(job_id: str, dataset_id: str, options: CleaningOptions) -> No
             fail_job(job_id, "Dataset not found")
             return
 
+        def cancel_guard() -> bool:
+            return is_job_cancel_requested(job_id)
+
         def progress(pct: int, message: str) -> None:
+            if is_job_cancel_requested(job_id):
+                raise _JobCancelled("Cleaning was canceled.")
             update_job(job_id, status="running", progress=pct, message=message)
 
         update_job(job_id, status="running", progress=5, message="Starting")
-        result = _perform_cleaning_with_run(dataset, options, db, progress_callback=progress)
+        result = _perform_cleaning_with_run(
+            dataset,
+            options,
+            db,
+            progress_callback=progress,
+            cancel_check=cancel_guard,
+        )
         finish_job(job_id, result)
+    except _JobCancelled:
+        cancel_job(job_id, "Cleaning canceled by user request.")
     except Exception as exc:
         fail_job(job_id, str(exc))
     finally:
@@ -1387,10 +1590,23 @@ def _run_clean_job(job_id: str, dataset_id: str, options: CleaningOptions) -> No
 
 @router.post("/datasets/{dataset_id}/clean-jobs")
 async def start_clean_job(dataset_id: str, options: CleaningOptions) -> dict:
+    if not dataset_id:
+        raise HTTPException(status_code=400, detail="dataset_id is required")
     job = create_job("clean", dataset_id)
     thread = Thread(target=_run_clean_job, args=(job["id"], dataset_id, options), daemon=True)
     thread.start()
     return job
+
+
+@router.post("/clean-jobs/{job_id}/cancel")
+async def request_cancel_clean_job(job_id: str) -> dict:
+    job = get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    if request_job_cancel(job_id):
+        cancel_job(job_id, "Cancellation requested.")
+    return get_job(job_id) or {}
 
 
 @router.options("/datasets/{dataset_id}/clean-jobs")

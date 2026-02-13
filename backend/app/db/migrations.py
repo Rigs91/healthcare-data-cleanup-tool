@@ -56,6 +56,7 @@ def ensure_schema(engine: Engine) -> None:
             conn.execute(text(f"CREATE TABLE clean_runs ({column_ddl})"))
             conn.execute(text("CREATE INDEX IF NOT EXISTS idx_clean_runs_dataset_id ON clean_runs(dataset_id)"))
             conn.execute(text("CREATE INDEX IF NOT EXISTS idx_clean_runs_created_at ON clean_runs(created_at)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS idx_clean_runs_status ON clean_runs(status)"))
         else:
             run_info = conn.execute(text("PRAGMA table_info(clean_runs)"))
             run_existing = {row[1] for row in run_info.fetchall()}
@@ -66,4 +67,5 @@ def ensure_schema(engine: Engine) -> None:
                 conn.execute(text(f"ALTER TABLE clean_runs ADD COLUMN {column} {base_ddl}"))
             conn.execute(text("CREATE INDEX IF NOT EXISTS idx_clean_runs_dataset_id ON clean_runs(dataset_id)"))
             conn.execute(text("CREATE INDEX IF NOT EXISTS idx_clean_runs_created_at ON clean_runs(created_at)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS idx_clean_runs_status ON clean_runs(status)"))
         conn.commit()

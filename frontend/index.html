@@ -14,7 +14,7 @@
     </div>
     <div id="fullscreen-backdrop" class="fullscreen-backdrop"></div>
     <main class="container">
-      <header class="hero">
+        <header class="hero">
         <div>
           <p class="eyebrow">Healthcare Data Cleanup</p>
           <h1>Turn messy healthcare data into AI- and RAG-ready datasets.</h1>
@@ -24,6 +24,16 @@
           </p>
           <div id="api-status" class="api-status">API: checking...</div>
           <div id="api-status-detail" class="api-status-detail"></div>
+          <div class="api-config">
+            <label class="field compact">
+              <span>API base</span>
+              <input id="api-base-input" type="text" placeholder="http://localhost:8000" />
+            </label>
+            <div class="hero-controls">
+              <button id="api-base-apply" class="ghost" type="button">Apply</button>
+              <button id="api-base-reset" class="ghost" type="button">Reset</button>
+            </div>
+          </div>
           <div class="hero-controls">
             <label class="field compact">
               <span>View mode</span>
@@ -113,11 +123,19 @@
           </label>
           <label id="dataset-file-field" class="field">
             <span>File</span>
-            <input id="dataset-file" type="file" accept=".csv,.tsv,.jsonl,.ndjson,.parquet" required />
+            <div id="upload-dropzone" class="upload-dropzone">
+              <input id="dataset-file" type="file" accept=".csv,.tsv,.jsonl,.ndjson,.parquet" />
+              <div class="upload-dropzone-text">Drag and drop a file here</div>
+              <small>or click anywhere in this area</small>
+              <div id="upload-filename" class="upload-filename helper"></div>
+            </div>
+            <div id="upload-session-info" class="helper"></div>
           </label>
           <button id="upload-button" type="submit" class="primary">Upload and Analyze</button>
+          <button id="upload-cancel" type="button" class="ghost hidden" disabled>Cancel Upload</button>
         </form>
         <div id="status" class="status"></div>
+        <div id="upload-metrics" class="status"></div>
         <div class="progress">
           <div id="upload-progress-bar" class="progress-bar"></div>
         </div>
@@ -242,6 +260,7 @@
         <div class="action-row">
           <button id="run-autopilot" class="primary" disabled>Run 95% Autopilot</button>
           <button id="run-cleaning" class="primary" disabled>Run Cleaning</button>
+          <button id="cancel-clean-job" class="ghost hidden" disabled>Cancel Cleaning Job</button>
         </div>
         <div id="clean-status" class="status"></div>
         <div class="progress">
@@ -251,6 +270,7 @@
         <div id="run-history" class="detail-grid"></div>
         <div class="download">
           <a id="download-link" class="ghost" href="#" target="_blank" rel="noreferrer">Download cleaned file</a>
+          <button id="download-link-copy" class="ghost" type="button">Copy URL</button>
         </div>
       </section>
 
@@ -289,6 +309,10 @@
         </div>
         <div id="qc-decision" class="summary"></div>
         <div id="qc-primary-result" class="summary"></div>
+        <div class="action-row">
+          <button id="qc-copy-json" class="ghost" type="button">Copy QC JSON</button>
+          <button id="qc-download-json" class="ghost" type="button">Download QC JSON</button>
+        </div>
         <a id="qc-download-link" class="ghost hidden" href="#" target="_blank" rel="noreferrer">Download cleaned dataset</a>
         <details class="advanced-panel">
           <summary>Advanced: Diagnostics and QC details</summary>
