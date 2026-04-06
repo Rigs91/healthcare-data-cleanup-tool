@@ -1,61 +1,53 @@
-﻿param(
+param(
   [int]$Port = 8000
 )
 
-function Test-PortInUse {
-  param([int]$TargetPort)
-  $matches = netstat -ano | Select-String -Pattern ":$TargetPort\s+.*LISTENING"
-  return $null -ne $matches
+$ErrorActionPreference = "Stop"
+. "$PSScriptRoot\common.ps1"
+
+$repoRoot = Get-RepoRoot -StartPath $PSScriptRoot
+$pythonExe = Ensure-BackendDependencies -RepoRoot $repoRoot
+Initialize-BackendEnvironment -RepoRoot $repoRoot -WorkflowVersion "v3_guided"
+
+$selectedPort = Find-AvailablePort -PreferredPort $Port
+if ($selectedPort -ne $Port) {
+  Write-Host "Port $Port is busy. Using $selectedPort instead."
 }
 
-$repoRoot = Resolve-Path "$PSScriptRoot\.."
-$venvPath = Join-Path $repoRoot ".venv"
-$pythonExe = Join-Path $venvPath "Scripts\python.exe"
-$reqFile = Join-Path $repoRoot "backend\requirements.txt"
-$markerFile = Join-Path $repoRoot "backend\.deps_installed"
-
-function Get-FileHashHex($path) {
-  if (-not (Test-Path $path)) { return "" }
-  return (Get-FileHash -Algorithm SHA256 $path).Hash
+$ollama = Get-OllamaStatus
+Write-Host "Guided workflow: $env:UI_WORKFLOW_VERSION"
+Write-Host "Frontend URL: http://127.0.0.1:$selectedPort"
+Write-Host "Ollama reachable: $($ollama.reachable)"
+Write-LauncherState -RepoRoot $repoRoot -State @{
+  base_url = "http://127.0.0.1:$selectedPort"
+  port = $selectedPort
+  workflow_version = $env:UI_WORKFLOW_VERSION
+  backend_status = "dev"
+  ollama_reachable = $ollama.reachable
 }
-
-if (-not (Test-Path $pythonExe)) {
-  Write-Host "Creating virtual environment..."
-  python -m venv $venvPath
-}
-
-$reqHash = Get-FileHashHex $reqFile
-$installedHash = ""
-if (Test-Path $markerFile) {
-  $installedHash = Get-Content $markerFile -ErrorAction SilentlyContinue
-}
-
-if ($reqHash -ne $installedHash) {
-  Write-Host "Installing backend dependencies..."
-  & $pythonExe -m pip install -r $reqFile
-  $reqHash | Set-Content -Encoding UTF8 $markerFile
+if ($ollama.installed_models.Count -gt 0) {
+  Write-Host "Installed local models: $($ollama.installed_models -join ', ')"
 } else {
-  Write-Host "Dependencies already installed."
+  Write-Host "Installed local models: none"
 }
-
-$originalPort = $Port
-if (Test-PortInUse $Port) {
-  for ($i = 1; $i -le 10; $i++) {
-    $candidate = $originalPort + $i
-    if (-not (Test-PortInUse $candidate)) {
-      $Port = $candidate
-      break
-    }
-  }
-  if ($Port -ne $originalPort) {
-    Write-Host "Port $originalPort in use. Using $Port instead."
-  } else {
-    Write-Host "Port $originalPort in use and no free port found."
-    exit 1
+if ($ollama.models.Count -gt 0) {
+  Write-Host "Planner-safe selectable models: $($ollama.models -join ', ')"
+} else {
+  Write-Host "Planner-safe selectable models: none"
+}
+if ($ollama.filtered_models.Count -gt 0) {
+  $filteredLines = @($ollama.filtered_models | ForEach-Object {
+    Format-OllamaModelLine -Prefix "-" -Name $_.name -Reason $_.reason
+  })
+  Write-Host "Filtered local models:"
+  foreach ($line in $filteredLines) {
+    Write-Host $line
   }
 }
 
-$env:PYTHONPATH = "$repoRoot\backend"
 Push-Location $repoRoot
-& $pythonExe -m uvicorn app.main:app --reload --host 0.0.0.0 --port $Port
-Pop-Location
+try {
+  & $pythonExe -m uvicorn app.main:app --reload --host 0.0.0.0 --port $selectedPort
+} finally {
+  Pop-Location
+}

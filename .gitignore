@@ -1,8 +1,17 @@
 .env
 .venv/
+node_modules/
 .pytest_cache/
 __pycache__/
 *.pyc
+.coverage
+.coverage.*
+.playwright-cli/
+backend/.deps_installed
+logs/
+output/
+Thumbs.db
+Desktop.ini
 
 # Local runtime artifacts
 data/app.db
@@ -10,5 +19,5 @@ data/raw/
 data/cleaned/
 
 # Large local sample files
-alpha test file 2.csv
-stress_multidomain_650mb.csv
+alpha test file *.csv
+stress_multidomain_*.csv

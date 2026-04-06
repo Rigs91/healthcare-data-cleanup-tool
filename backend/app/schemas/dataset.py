@@ -31,6 +31,10 @@ class CleanRunDetail(BaseModel):
     performance_mode: Optional[str] = None
     privacy_mode: Optional[str] = None
     output_format: Optional[str] = None
+    cleanup_mode: Optional[str] = None
+    llm_provider: Optional[str] = None
+    llm_model: Optional[str] = None
+    llm_plan: Optional[Dict[str, Any]] = None
     started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
     duration_ms: Optional[int] = None
@@ -59,6 +63,9 @@ class DatasetBase(BaseModel):
     usage_intent: Optional[str] = None
     output_format: Optional[str] = None
     privacy_mode: Optional[str] = None
+    cleanup_mode: Optional[str] = None
+    llm_provider: Optional[str] = None
+    llm_model: Optional[str] = None
     file_size_bytes: Optional[int] = None
     row_count_estimate: Optional[int] = None
     latest_run_id: Optional[str] = None
@@ -70,6 +77,7 @@ class DatasetDetail(DatasetBase):
     column_map: Optional[Dict[str, str]] = None
     raw_path: Optional[str] = None
     cleaned_path: Optional[str] = None
+    llm_plan: Optional[Dict[str, Any]] = None
     latest_run: Optional[CleanRunDetail] = None
 
     model_config = ConfigDict(from_attributes=True)

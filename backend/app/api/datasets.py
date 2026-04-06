@@ -25,6 +25,7 @@ from app.config import (
     STREAMING_MAX_WORKERS_FAST,
     STREAMING_MAX_WORKERS_ULTRA,
     STREAMING_THRESHOLD_MB,
+    UI_WORKFLOW_VERSION,
 )
 from app.db.models import CleanRun, Dataset
 from app.db.session import SessionLocal
@@ -32,6 +33,7 @@ from app.schemas.dataset import DatasetBase, DatasetDetail, DatasetList
 from app.services.cleaning import MISSING_VALUES_LOWER, clean_dataframe, standardize_columns
 from app.services.jobs import (
     create_job,
+    cancel_job,
     fail_job,
     finish_job,
     get_job,
@@ -39,6 +41,15 @@ from app.services.jobs import (
     request_job_cancel,
     update_job,
 )
+from app.services.llm import (
+    get_ollama_provider_status,
+    merge_plan_recommendations,
+    normalize_cleanup_mode,
+    plan_cleanup_with_ollama,
+    profile_with_llm_assist,
+    semantic_overrides_from_plan,
+)
+from app.services.llm.ollama_client import OllamaClientError, OllamaModelSelectionError
 from app.services.outcomes import build_postclean_decision, evaluate_outcomes
 from app.services.profiling import build_profile, infer_hints_from_profile
 from app.services.qc import build_qc_report, build_streaming_qc_report
@@ -85,6 +96,8 @@ class CleaningOptions(BaseModel):
     coercion_mode: str | None = None
     privacy_mode: str | None = None
     performance_mode: str | None = None
+    cleanup_mode: str | None = None
+    llm_model: str | None = None
 
 
 class UploadStart(BaseModel):
@@ -95,6 +108,8 @@ class UploadStart(BaseModel):
     usage_intent: str | None = None
     output_format: str | None = None
     privacy_mode: str | None = None
+    cleanup_mode: str | None = None
+    llm_model: str | None = None
     file_size: int = Field(..., alias="fileSize")
     total_chunks: int = Field(..., alias="totalChunks")
 
@@ -107,6 +122,8 @@ class GoogleDriveImportRequest(BaseModel):
     usage_intent: str | None = None
     output_format: str | None = None
     privacy_mode: str | None = None
+    cleanup_mode: str | None = None
+    llm_model: str | None = None
 
 
 class AutopilotRequest(BaseModel):
@@ -115,6 +132,8 @@ class AutopilotRequest(BaseModel):
     output_format: str | None = None
     privacy_mode: str | None = None
     performance_mode: str | None = None
+    cleanup_mode: str | None = None
+    llm_model: str | None = None
 
 
 def get_db():
@@ -133,6 +152,82 @@ def _deserialize_json(value: str | None) -> Any:
     if not value:
         return None
     return json.loads(value)
+
+
+def _sample_rows_for_planner(df: pd.DataFrame, *, limit: int = 8) -> list[dict[str, Any]]:
+    sample = df.head(limit).copy()
+    sample = sample.where(sample.notnull(), None)
+    rows = sample.to_dict(orient="records")
+    return [{str(key): value for key, value in row.items()} for row in rows]
+
+
+def _ensure_dataset_llm_plan(
+    *,
+    dataset: Dataset,
+    profile: dict[str, Any],
+    sample_rows: list[dict[str, Any]] | None,
+    usage_intent: str | None,
+    output_format: str | None,
+    privacy_mode: str | None,
+    cleanup_mode: str | None,
+    llm_model: str | None,
+    db: Session,
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    normalized_mode = normalize_cleanup_mode(cleanup_mode or dataset.cleanup_mode)
+    if normalized_mode != "ollama_assisted":
+        cleaned_profile = profile_with_llm_assist(profile, None)
+        dataset.cleanup_mode = normalized_mode
+        dataset.llm_provider = None
+        dataset.llm_model = None
+        dataset.llm_plan_json = None
+        dataset.profile_json = _serialize_json(cleaned_profile)
+        db.commit()
+        db.refresh(dataset)
+        return cleaned_profile, None
+
+    requested_model = str(llm_model or dataset.llm_model or "").strip() or None
+    existing_plan = _deserialize_json(dataset.llm_plan_json)
+    if (
+        isinstance(existing_plan, dict)
+        and str(existing_plan.get("model") or "").strip() == str(requested_model or existing_plan.get("model") or "").strip()
+    ):
+        plan = existing_plan
+    else:
+        try:
+            plan = plan_cleanup_with_ollama(
+                profile=profile,
+                sample_rows=sample_rows,
+                usage_intent=usage_intent,
+                output_format=output_format,
+                privacy_mode=privacy_mode,
+                requested_model=requested_model,
+            )
+        except OllamaModelSelectionError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "OLLAMA_MODEL_UNSUPPORTED",
+                    "message": str(exc),
+                },
+            ) from exc
+        except OllamaClientError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "OLLAMA_UNAVAILABLE",
+                    "message": str(exc),
+                },
+            ) from exc
+        dataset.llm_plan_json = _serialize_json(plan)
+
+    dataset.cleanup_mode = normalized_mode
+    dataset.llm_provider = str((plan or {}).get("provider") or "ollama")
+    dataset.llm_model = str((plan or {}).get("model") or requested_model or "").strip() or None
+    profile_with_assist = profile_with_llm_assist(profile, plan)
+    dataset.profile_json = _serialize_json(profile_with_assist)
+    db.commit()
+    db.refresh(dataset)
+    return profile_with_assist, plan
 
 
 def _upload_meta_path(upload_id: str) -> Path:
@@ -210,6 +305,8 @@ def _upload_session_state(meta: dict[str, Any], upload_path: Path | None = None)
         "usage_intent": meta.get("usage_intent"),
         "output_format": meta.get("output_format"),
         "privacy_mode": meta.get("privacy_mode"),
+        "cleanup_mode": meta.get("cleanup_mode"),
+        "llm_model": meta.get("llm_model"),
         "file_size": meta.get("file_size"),
         "total_chunks": total_chunks,
         "uploaded_chunks": uploaded_chunks,
@@ -257,6 +354,9 @@ def _dataset_to_detail(
         usage_intent=dataset.usage_intent,
         output_format=dataset.output_format,
         privacy_mode=dataset.privacy_mode,
+        cleanup_mode=dataset.cleanup_mode,
+        llm_provider=dataset.llm_provider,
+        llm_model=dataset.llm_model,
         file_size_bytes=dataset.file_size_bytes,
         row_count_estimate=dataset.row_count_estimate,
         latest_run_id=dataset.latest_run_id,
@@ -265,6 +365,7 @@ def _dataset_to_detail(
         column_map=_deserialize_json(dataset.column_map_json),
         raw_path=dataset.raw_path,
         cleaned_path=dataset.cleaned_path,
+        llm_plan=_deserialize_json(dataset.llm_plan_json),
         latest_run=latest_run_payload,
     )
 
@@ -280,6 +381,8 @@ def _create_dataset_from_path(
     usage_intent: str | None,
     output_format: str | None,
     privacy_mode: str | None,
+    cleanup_mode: str | None = None,
+    llm_model: str | None = None,
     source_type: str = "file_upload",
     source_details: dict[str, Any] | None = None,
 ) -> Dataset:
@@ -315,6 +418,34 @@ def _create_dataset_from_path(
     )
     if source_details:
         profile["source"] = source_details
+    normalized_cleanup_mode = normalize_cleanup_mode(cleanup_mode)
+    llm_plan: dict[str, Any] | None = None
+    if normalized_cleanup_mode == "ollama_assisted":
+        try:
+            llm_plan = plan_cleanup_with_ollama(
+                profile=profile,
+                sample_rows=_sample_rows_for_planner(raw_df),
+                usage_intent=usage_intent,
+                output_format=output_format or "csv",
+                privacy_mode=privacy_mode or "safe_harbor",
+                requested_model=llm_model,
+            )
+        except OllamaModelSelectionError as exc:
+            saved_path.unlink(missing_ok=True)
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "OLLAMA_MODEL_UNSUPPORTED",
+                    "message": str(exc),
+                },
+            ) from exc
+        except OllamaClientError as exc:
+            saved_path.unlink(missing_ok=True)
+            raise HTTPException(
+                status_code=503,
+                detail={"code": "OLLAMA_UNAVAILABLE", "message": str(exc)},
+            ) from exc
+        profile = profile_with_llm_assist(profile, llm_plan)
 
     dataset = Dataset(
         id=dataset_id,
@@ -331,6 +462,10 @@ def _create_dataset_from_path(
         usage_intent=usage_intent or "training",
         output_format=output_format or "csv",
         privacy_mode=privacy_mode or "safe_harbor",
+        cleanup_mode=normalized_cleanup_mode,
+        llm_provider=str((llm_plan or {}).get("provider") or "").strip() or None,
+        llm_model=str((llm_plan or {}).get("model") or llm_model or "").strip() or None,
+        llm_plan_json=_serialize_json(llm_plan),
         file_size_bytes=size_bytes,
         row_count_estimate=row_count_estimate,
         latest_run_id=None,
@@ -370,6 +505,17 @@ def _recompute_profile_for_dataset(*, dataset: Dataset, db: Session) -> Dataset:
         sampled=sampled,
         privacy_mode=dataset.privacy_mode or "safe_harbor",
     )
+    profile, _llm_plan = _ensure_dataset_llm_plan(
+        dataset=dataset,
+        profile=profile,
+        sample_rows=_sample_rows_for_planner(raw_df),
+        usage_intent=dataset.usage_intent,
+        output_format=dataset.output_format or "csv",
+        privacy_mode=dataset.privacy_mode or "safe_harbor",
+        cleanup_mode=dataset.cleanup_mode,
+        llm_model=dataset.llm_model,
+        db=db,
+    )
 
     dataset.profile_json = _serialize_json(profile)
     dataset.column_map_json = _serialize_json(column_map)
@@ -387,9 +533,15 @@ def _perform_cleaning(
     db: Session,
     *,
     progress_callback=None,
+    llm_plan: dict[str, Any] | None = None,
 ) -> dict:
     profile = _deserialize_json(dataset.profile_json) or {}
-    column_metadata = infer_hints_from_profile(profile)
+    column_metadata = infer_hints_from_profile(
+        profile,
+        semantic_overrides=semantic_overrides_from_plan(llm_plan)
+        if normalize_cleanup_mode(options.cleanup_mode or dataset.cleanup_mode) == "ollama_assisted"
+        else None,
+    )
 
     usage_intent = dataset.usage_intent or "training"
     profile_rag_score = (profile.get("rag_readiness") or {}).get("score")
@@ -601,6 +753,40 @@ def _perform_cleaning_with_run(
     cancel_check: Callable[[], bool] | None = None,
 ) -> dict:
     profile = _deserialize_json(dataset.profile_json) or {}
+    requested_cleanup_mode = normalize_cleanup_mode(options.cleanup_mode or dataset.cleanup_mode)
+    sample_rows: list[dict[str, Any]] | None = None
+    if requested_cleanup_mode == "ollama_assisted":
+        raw_path = Path(dataset.raw_path or "")
+        if raw_path.exists():
+            try:
+                raw_df, _delimiter = read_dataframe(
+                    raw_path,
+                    file_type=dataset.file_type or detect_file_type(dataset.original_filename),
+                    max_rows=min(PROFILE_SAMPLE_ROWS, 12),
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            sample_rows = _sample_rows_for_planner(raw_df)
+    profile, llm_plan = _ensure_dataset_llm_plan(
+        dataset=dataset,
+        profile=profile if isinstance(profile, dict) else {},
+        sample_rows=sample_rows,
+        usage_intent=dataset.usage_intent,
+        output_format=options.output_format or dataset.output_format or "csv",
+        privacy_mode=options.privacy_mode or dataset.privacy_mode or "safe_harbor",
+        cleanup_mode=requested_cleanup_mode,
+        llm_model=options.llm_model or dataset.llm_model,
+        db=db,
+    )
+    options_payload = merge_plan_recommendations(
+        options.model_dump(),
+        plan=llm_plan,
+        explicit_fields=set(options.model_fields_set),
+    )
+    options_payload["cleanup_mode"] = requested_cleanup_mode
+    if requested_cleanup_mode == "ollama_assisted":
+        options_payload["llm_model"] = dataset.llm_model
+    options = CleaningOptions.model_validate(options_payload)
     assessment = profile.get("assessment") if isinstance(profile, dict) else None
     performance_mode = options.performance_mode or "balanced"
     privacy_mode = options.privacy_mode or dataset.privacy_mode or "safe_harbor"
@@ -615,6 +801,10 @@ def _perform_cleaning_with_run(
         performance_mode=performance_mode,
         privacy_mode=privacy_mode,
         output_format=output_format,
+        cleanup_mode=requested_cleanup_mode,
+        llm_provider=dataset.llm_provider,
+        llm_model=dataset.llm_model,
+        llm_plan=llm_plan,
         profile_snapshot=profile if isinstance(profile, dict) else None,
         assessment=assessment if isinstance(assessment, dict) else None,
     )
@@ -627,7 +817,13 @@ def _perform_cleaning_with_run(
             progress_callback(pct, message)
 
     try:
-        result = _perform_cleaning(dataset, options, db, progress_callback=_guarded_progress_callback)
+        result = _perform_cleaning(
+            dataset,
+            options,
+            db,
+            progress_callback=_guarded_progress_callback,
+            llm_plan=llm_plan,
+        )
         duration_ms = int((time.perf_counter() - started) * 1000)
         qc_report = result.get("qc") or {}
         rag_after = qc_report.get("rag_readiness") if isinstance(qc_report, dict) else None
@@ -688,6 +884,7 @@ def _autopilot_cleaning_options(
     dataset: Dataset,
     profile: dict[str, Any],
     payload: AutopilotRequest,
+    llm_plan: dict[str, Any] | None = None,
 ) -> CleaningOptions:
     usage_intent = (dataset.usage_intent or "training").lower()
     pii_columns = ((profile.get("summary") or {}).get("columns_with_pii") or [])
@@ -701,7 +898,7 @@ def _autopilot_cleaning_options(
     if performance_mode not in {"balanced", "fast", "ultra_fast"}:
         performance_mode = "balanced"
 
-    return CleaningOptions(
+    base_values = dict(
         remove_duplicates=True,
         drop_empty_columns=True,
         deidentify=None,
@@ -713,7 +910,19 @@ def _autopilot_cleaning_options(
         coercion_mode="safe",
         privacy_mode=payload.privacy_mode or default_privacy,
         performance_mode=performance_mode,
+        cleanup_mode=payload.cleanup_mode or dataset.cleanup_mode or "deterministic",
+        llm_model=payload.llm_model or dataset.llm_model,
     )
+    explicit_fields = set(payload.model_fields_set) - {"dataset_id", "target_score"}
+    merged = merge_plan_recommendations(base_values, plan=llm_plan, explicit_fields=explicit_fields)
+    merged["cleanup_mode"] = normalize_cleanup_mode(payload.cleanup_mode or dataset.cleanup_mode)
+    if merged["cleanup_mode"] == "ollama_assisted":
+        merged["llm_model"] = (
+            str(payload.llm_model or dataset.llm_model or (llm_plan or {}).get("model") or "").strip() or None
+        )
+    else:
+        merged["llm_model"] = None
+    return CleaningOptions.model_validate(merged)
 
 
 def _top_rag_blockers(readiness: dict[str, Any] | None, *, limit: int = 5) -> list[dict[str, Any]]:
@@ -1161,7 +1370,32 @@ def _run_autopilot_for_dataset(
     db: Session,
 ) -> dict:
     profile = _deserialize_json(dataset.profile_json) or {}
-    options = _autopilot_cleaning_options(dataset=dataset, profile=profile, payload=payload)
+    requested_cleanup_mode = normalize_cleanup_mode(payload.cleanup_mode or dataset.cleanup_mode)
+    sample_rows: list[dict[str, Any]] | None = None
+    if requested_cleanup_mode == "ollama_assisted":
+        raw_path = Path(dataset.raw_path or "")
+        if raw_path.exists():
+            try:
+                raw_df, _delimiter = read_dataframe(
+                    raw_path,
+                    file_type=dataset.file_type or detect_file_type(dataset.original_filename),
+                    max_rows=min(PROFILE_SAMPLE_ROWS, 12),
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            sample_rows = _sample_rows_for_planner(raw_df)
+    profile, llm_plan = _ensure_dataset_llm_plan(
+        dataset=dataset,
+        profile=profile if isinstance(profile, dict) else {},
+        sample_rows=sample_rows,
+        usage_intent=dataset.usage_intent,
+        output_format=payload.output_format or dataset.output_format or "csv",
+        privacy_mode=payload.privacy_mode or dataset.privacy_mode or "safe_harbor",
+        cleanup_mode=requested_cleanup_mode,
+        llm_model=payload.llm_model or dataset.llm_model,
+        db=db,
+    )
+    options = _autopilot_cleaning_options(dataset=dataset, profile=profile, payload=payload, llm_plan=llm_plan)
     pre_blockers = _top_rag_blockers((profile.get("rag_readiness") if isinstance(profile, dict) else None), limit=5)
 
     result = _perform_cleaning_with_run(dataset, options, db)
@@ -1210,7 +1444,10 @@ def _run_autopilot_for_dataset(
                 if comparison:
                     optimized_qc["rag_readiness_comparison"] = comparison
 
-                column_metadata = infer_hints_from_profile(profile if isinstance(profile, dict) else {})
+                column_metadata = infer_hints_from_profile(
+                    profile if isinstance(profile, dict) else {},
+                    semantic_overrides=semantic_overrides_from_plan(_deserialize_json(dataset.llm_plan_json)),
+                )
                 try:
                     optimized_qc["issues"] = build_validation_issues(
                         optimized_df,
@@ -1267,6 +1504,12 @@ def _run_autopilot_for_dataset(
         "achieved_score": achieved,
         "status": "on_track" if on_track else "needs_attention",
         "resolved_options": options.model_dump(),
+        "cleanup_mode": dataset.cleanup_mode or "deterministic",
+        "llm_provider": dataset.llm_provider,
+        "llm_model": dataset.llm_model,
+        "llm_plan_status": (_deserialize_json(dataset.llm_plan_json) or {}).get("status")
+        if dataset.llm_plan_json
+        else None,
         "preclean_top_blockers": pre_blockers,
         "postclean_top_blockers": _top_rag_blockers(rag_after if isinstance(rag_after, dict) else None, limit=5),
         "optimization": optimization_report,
@@ -1276,7 +1519,27 @@ def _run_autopilot_for_dataset(
 
 @router.get("/health")
 async def health() -> dict:
-    return {"status": "ok", "service": "hc-data-cleanup-ai", "version": APP_VERSION}
+    ollama = get_ollama_provider_status()
+    return {
+        "status": "ok",
+        "service": "hc-data-cleanup-ai",
+        "version": APP_VERSION,
+        "ui_workflow_version": UI_WORKFLOW_VERSION,
+        "capabilities": {
+            "workflow_v2_enabled": True,
+            "workflow_v2_routes": True,
+            "workflow_v2_active": UI_WORKFLOW_VERSION == "v3_guided",
+            "upload_cancellation": True,
+            "clean_job_cancellation": True,
+            "cleanup_modes": ["deterministic", "ollama_assisted"],
+            "default_cleanup_mode": "deterministic",
+            "supported_sources": ["file_upload"],
+            "unsupported_sources": ["google_drive", "aws_s3", "snowflake", "oracle", "fhir_hl7"],
+        },
+        "providers": {
+            "ollama": ollama,
+        },
+    }
 
 
 @router.get("/datasets", response_model=DatasetList)
@@ -1296,6 +1559,9 @@ async def list_datasets(db: Session = Depends(get_db)) -> DatasetList:
                 usage_intent=item.usage_intent,
                 output_format=item.output_format,
                 privacy_mode=item.privacy_mode,
+                cleanup_mode=item.cleanup_mode,
+                llm_provider=item.llm_provider,
+                llm_model=item.llm_model,
                 file_size_bytes=item.file_size_bytes,
                 row_count_estimate=item.row_count_estimate,
                 latest_run_id=item.latest_run_id,
@@ -1312,6 +1578,8 @@ async def create_dataset(
     usage_intent: str | None = Form(None),
     output_format: str | None = Form(None),
     privacy_mode: str | None = Form(None),
+    cleanup_mode: str | None = Form(None),
+    llm_model: str | None = Form(None),
     db: Session = Depends(get_db),
 ) -> DatasetDetail:
     filename = (file.filename or "").strip()
@@ -1331,6 +1599,8 @@ async def create_dataset(
         usage_intent=usage_intent,
         output_format=output_format,
         privacy_mode=privacy_mode,
+        cleanup_mode=cleanup_mode,
+        llm_model=llm_model,
     )
     return _dataset_to_detail(dataset, db=db)
 
@@ -1492,6 +1762,8 @@ async def complete_upload(upload_id: str, db: Session = Depends(get_db)) -> Data
             usage_intent=meta.get("usage_intent"),
             output_format=meta.get("output_format"),
             privacy_mode=meta.get("privacy_mode"),
+            cleanup_mode=meta.get("cleanup_mode"),
+            llm_model=meta.get("llm_model"),
         )
     except Exception:
         final_path.unlink(missing_ok=True)

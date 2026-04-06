@@ -225,3 +225,113 @@ def test_chunked_complete_upload_accepts_mixed_timezone_dates():
     assert dataset["id"]
     assert dataset["status"] == "ingested"
     assert (dataset.get("profile") or {}).get("row_count", 0) >= 3
+
+
+def test_legacy_clean_supports_ollama_assisted_mode(monkeypatch):
+    from app.api import datasets as datasets_api
+
+    monkeypatch.setattr(
+        datasets_api,
+        "plan_cleanup_with_ollama",
+        lambda **kwargs: {
+            "provider": "ollama",
+            "model": kwargs.get("requested_model") or "llama3.1:8b",
+            "status": "validated",
+            "prompt_version": "test_prompt_v1",
+            "summary": "Prefer Safe Harbor.",
+            "explanation": "Synthetic planner result for legacy test.",
+            "top_blockers": ["PII present"],
+            "semantic_overrides": {"phone": "phone"},
+            "drop_candidates": [],
+            "keep_priority_columns": ["notes"],
+            "recommended_options": {
+                "privacy_mode": "safe_harbor",
+                "performance_mode": "balanced",
+                "output_format": "csv",
+            },
+            "validation_notes": [],
+        },
+    )
+
+    client = TestClient(app)
+    files = {"file": ("run_assisted.csv", io.BytesIO(b"member_id,notes,phone\nm1,Needs review,312-555-1111\n"), "text/csv")}
+    create_resp = client.post(
+        "/api/datasets",
+        files=files,
+        data={
+            "name": "legacy_assisted",
+            "usage_intent": "training",
+            "cleanup_mode": "ollama_assisted",
+            "llm_model": "llama3.1:8b",
+        },
+    )
+    assert create_resp.status_code == 200
+    dataset = create_resp.json()
+    assert dataset["cleanup_mode"] == "ollama_assisted"
+    assert dataset["llm_model"] == "llama3.1:8b"
+
+    clean_resp = client.post(
+        f"/api/datasets/{dataset['id']}/clean",
+        json={"cleanup_mode": "ollama_assisted", "llm_model": "llama3.1:8b"},
+    )
+    assert clean_resp.status_code == 200
+    payload = clean_resp.json()
+    assert payload["run"]["cleanup_mode"] == "ollama_assisted"
+    assert payload["run"]["llm_provider"] == "ollama"
+    assert payload["run"]["llm_model"] == "llama3.1:8b"
+    assert isinstance(payload["run"]["llm_plan"], dict)
+
+
+def test_legacy_create_dataset_returns_503_when_ollama_is_unavailable(monkeypatch):
+    from app.api import datasets as datasets_api
+    from app.services.llm.ollama_client import OllamaClientError
+
+    def _raise_unavailable(**kwargs):
+        raise OllamaClientError("Ollama is down.")
+
+    monkeypatch.setattr(datasets_api, "plan_cleanup_with_ollama", _raise_unavailable)
+
+    client = TestClient(app)
+    files = {"file": ("run_assisted.csv", io.BytesIO(b"member_id,notes\nm1,Needs review\n"), "text/csv")}
+    create_resp = client.post(
+        "/api/datasets",
+        files=files,
+        data={
+            "name": "legacy_assisted_unavailable",
+            "usage_intent": "training",
+            "cleanup_mode": "ollama_assisted",
+            "llm_model": "llama3.1:8b",
+        },
+    )
+    assert create_resp.status_code == 503
+    detail = create_resp.json().get("detail") or {}
+    assert detail.get("code") == "OLLAMA_UNAVAILABLE"
+
+
+def test_legacy_create_dataset_returns_400_when_requested_model_is_filtered(monkeypatch):
+    from app.api import datasets as datasets_api
+    from app.services.llm.ollama_client import OllamaModelSelectionError
+
+    def _raise_unsupported(**kwargs):
+        raise OllamaModelSelectionError(
+            "Requested Ollama model 'qwen2.5:32b' is installed locally but not eligible for planner-safe cleanup: Model is 32B and exceeds the 14B planner-safe limit."
+        )
+
+    monkeypatch.setattr(datasets_api, "plan_cleanup_with_ollama", _raise_unsupported)
+
+    client = TestClient(app)
+    files = {"file": ("run_assisted.csv", io.BytesIO(b"member_id,notes\nm1,Needs review\n"), "text/csv")}
+    create_resp = client.post(
+        "/api/datasets",
+        files=files,
+        data={
+            "name": "legacy_assisted_filtered",
+            "usage_intent": "training",
+            "cleanup_mode": "ollama_assisted",
+            "llm_model": "qwen2.5:32b",
+        },
+    )
+    assert create_resp.status_code == 400
+    detail = create_resp.json().get("detail") or {}
+    assert detail.get("code") == "OLLAMA_MODEL_UNSUPPORTED"
+    assert "not eligible for planner-safe cleanup" in str(detail.get("message", "")).lower()

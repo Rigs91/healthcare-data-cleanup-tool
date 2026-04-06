@@ -1,6 +1,0 @@
-﻿Patient ID,Full Name,DOB,Encounter Date,Charge Amount,ICD Code,Phone,Email,Zip,Notes,Status,Empty Col
-A001,Jane Doe,01/14/1982,2023-12-01,"1,250.75",a10,(312)555-1212,jane.doe@example.com,60601,"  Needs follow up  ",Active,
-A001,Jane Doe,01/14/1982,12/01/2023,"1,250.75",a10,3125551212,jane.doe@example.com,60601,"  Needs follow up  ",Active,
-A002,Robert Smith,1985-03-04,2024/01/15,900,b20,773.555.0101,robert.smith@health.org,,"?",Inactive,
-A003,,N/A,2023-11-02,$0.00,c30,,unknown,02139,"N/A",,
-A004,Maria Lopez,07-08-1979,,450.25,,(312)555-9999,,60614,"Late check-in",Active,

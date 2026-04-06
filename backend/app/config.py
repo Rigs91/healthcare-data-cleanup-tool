@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import os
 from pathlib import Path
@@ -43,6 +43,16 @@ for _env_path in (BASE_DIR / ".env", BASE_DIR / "backend" / ".env"):
 
 APP_VERSION = os.getenv("APP_VERSION", APP_VERSION)
 ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", ALLOWED_ORIGINS)
+UI_WORKFLOW_VERSION = os.getenv("UI_WORKFLOW_VERSION", "v3_guided").strip() or "v3_guided"
+if UI_WORKFLOW_VERSION not in {"v2_legacy", "v3_guided"}:
+    UI_WORKFLOW_VERSION = "v3_guided"
+OLLAMA_ENABLED = os.getenv("OLLAMA_ENABLED", "true").strip().lower() not in {"0", "false", "no", "off"}
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434").strip() or "http://127.0.0.1:11434"
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "").strip()
+try:
+    OLLAMA_TIMEOUT_SECONDS = float(os.getenv("OLLAMA_TIMEOUT_SECONDS", "60").strip() or "60")
+except ValueError:
+    OLLAMA_TIMEOUT_SECONDS = 60.0
 
 MAX_UPLOAD_MB = 2048
 STREAMING_THRESHOLD_MB = 200

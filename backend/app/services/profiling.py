@@ -499,11 +499,20 @@ def build_profile(
     return profile_payload
 
 
-def infer_hints_from_profile(profile: Dict[str, Any]) -> Dict[str, Dict[str, str]]:
+def infer_hints_from_profile(
+    profile: Dict[str, Any],
+    *,
+    semantic_overrides: Dict[str, str] | None = None,
+) -> Dict[str, Dict[str, str]]:
     hints: Dict[str, Dict[str, str]] = {}
     for column in profile.get("columns", []):
-        hints[column["clean_name"]] = {
+        clean_name = column["clean_name"]
+        hints[clean_name] = {
             "primitive_type": column.get("primitive_type") or "string",
             "semantic_hint": column.get("semantic_hint"),
         }
+    for clean_name, semantic_hint in (semantic_overrides or {}).items():
+        if clean_name not in hints:
+            continue
+        hints[clean_name]["semantic_hint"] = semantic_hint
     return hints

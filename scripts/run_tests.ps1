@@ -1,7 +1,14 @@
-﻿$repoRoot = Resolve-Path "$PSScriptRoot\.."
-$env:PYTHONPATH = "$repoRoot\backend"
-$pythonExe = Join-Path $repoRoot ".venv\Scripts\python.exe"
+$ErrorActionPreference = "Stop"
+. "$PSScriptRoot\common.ps1"
+
+$repoRoot = Get-RepoRoot -StartPath $PSScriptRoot
+$pythonExe = Ensure-BackendDependencies -RepoRoot $repoRoot
+Initialize-BackendEnvironment -RepoRoot $repoRoot -WorkflowVersion "v3_guided"
 
 Push-Location $repoRoot
-& $pythonExe -m pytest backend\tests -q
-Pop-Location
+try {
+  & $pythonExe -m pytest backend\tests -q
+  exit $LASTEXITCODE
+} finally {
+  Pop-Location
+}

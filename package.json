@@ -1,9 +1,12 @@
 ﻿{
-  "name": "hc-data-cleanup-ai",
-  "version": "0.2.0",
+  "name": "healthcare-data-cleanup-tool",
+  "version": "1.0.0",
   "private": true,
+  "description": "Guided healthcare dataset cleanup with deterministic transforms and optional local Ollama planning.",
   "scripts": {
+    "start": "cmd /c RUN_HCDATA_1_CLICK.cmd",
     "dev": "powershell -ExecutionPolicy Bypass -File .\\scripts\\dev.ps1",
-    "test": "powershell -ExecutionPolicy Bypass -File .\\scripts\\run_tests.ps1"
+    "test": "powershell -ExecutionPolicy Bypass -File .\\scripts\\run_tests.ps1",
+    "smoke": "powershell -ExecutionPolicy Bypass -File .\\scripts\\test_tool.ps1"
   }
 }

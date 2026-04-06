@@ -1,132 +1,150 @@
-﻿# HcDataCleanUpAi MVP
+# Healthcare Data Cleanup Tool
 
-A working MVP that ingests messy healthcare datasets, profiles the columns, runs a cleaning engine, and outputs AI- and RAG-ready cleaned data.
+Guided healthcare dataset cleanup with schema profiling, deterministic normalization, and optional local Ollama-assisted planning.
 
-## Product Documentation
-For the current roadmap and V2 direction, see [`VERSION_2_0_PRD.md`](VERSION_2_0_PRD.md).
+| Guided upload and engine selection | Profile, cleanup, and export |
+| --- | --- |
+| ![Upload flow](docs/screenshots/01-home-or-upload.png) | ![Cleanup results](docs/screenshots/03-cleanup-or-validation-results.png) |
+
+| Schema and pre-check view | Export and quality summary |
+| --- | --- |
+| ![Profile and pre-check](docs/screenshots/02-profile-or-schema-view.png) | ![Export and summary](docs/screenshots/04-export-or-quality-summary.png) |
+
+## What This Product Does
+
+This app helps operators clean up messy healthcare datasets before they are used for analytics, reporting, or downstream AI workflows. It walks the user through a guided flow:
+
+1. Upload a local CSV, TSV, JSONL, or Parquet file.
+2. Profile schema quality, likely field meaning, domain signals, and data quality risks.
+3. Run deterministic cleanup with optional local LLM-assisted planning through Ollama.
+4. Review quality outputs and export a cleaner dataset.
+
+The product is intentionally local-first and demo-safe. The bundled sample data is synthetic, and the app does not require cloud services to demonstrate the core workflow.
+
+## The Problem It Solves
+
+Healthcare data exports are often inconsistent before they reach analytics teams or AI pipelines. Fields drift, dates arrive in mixed formats, phones and ZIP codes are messy, duplicate rows appear, and risky values may be buried in free text. This tool makes those issues visible, proposes a cleanup strategy, and keeps the final transforms understandable and reviewable.
+
+## Who It Is For
+
+- Product managers and platform teams shaping healthcare data workflows
+- Data engineers and analytics engineers preparing inputs for reporting or AI
+- Operators who need a fast, reviewable cleanup path without sending data to a cloud service
+- Interviewers validating product thinking, workflow design, and technical fluency
+
+## Why It Stands Out
+
+- Guided workflow instead of a cluttered data workbench
+- Honest AI positioning: Ollama assists with planning, while deterministic rules execute the final cleanup
+- Healthcare-specific profiling signals for claims, EHR, labs, and pharmacy-style datasets
+- Local-first packaging with a one-click Windows launcher and explicit health checks
+- Clear trust story: quality checks, run history, diagnostics, and public-safe sample data
+
+## 60-Second Demo Path
+
+1. Run `.\RUN_HCDATA_1_CLICK.cmd` from the repo root.
+2. In the app, keep `Deterministic` selected for the fastest path or choose `Ollama local model` if Ollama is already running.
+3. Upload `data/sample_messy.csv`.
+4. Show the pre-check summary and top blockers.
+5. Run guided cleanup.
+6. Show the final quality summary and download link.
+7. Optional: open `History & Diagnostics` to show run traceability and engine metadata.
+
+The exact live script is in [docs/DEMO-SCRIPT.md](docs/DEMO-SCRIPT.md).
+
+## Core Workflows
+
+### Guided cleanup
+
+- Upload a local healthcare-style dataset
+- Inspect pre-check readiness, blockers, and recommended actions
+- Run cleanup with deterministic execution and optional Ollama-assisted planning
+- Export a cleaned dataset for analytics or downstream AI workflows
+
+### Diagnostics and traceability
+
+- Review dataset and run history
+- Inspect cleanup mode, model metadata, and plan status
+- See quality outputs and diagnostics JSON for each run
+
+### Local LLM assistance
+
+- The app can call a local Ollama model to interpret columns and suggest cleanup options
+- Only compact profile context and bounded sample rows are sent to the model
+- The full dataset stays in the deterministic engine for the actual transforms
+
+## Architecture And Data Handling
+
+The frontend is a static guided UI served by FastAPI. The backend handles file upload, profiling, cleanup orchestration, export, and run history. SQLite stores local metadata for datasets and runs, while cleaned files are written to local disk.
+
+The profiling layer infers primitive types, semantic hints, domain signals, missingness, and basic PII indicators. When Ollama-assisted mode is selected, the backend asks a local model for a structured cleanup plan, validates the response server-side, and merges only supported directives into the deterministic cleanup path.
 
 ## Tech Stack
-- Backend: `FastAPI` + `pandas` + `SQLAlchemy` (SQLite)
-- Frontend: Static HTML/CSS/JS served by FastAPI
-- Storage: Local `data/` folder for raw and cleaned files
 
-## What the Engine Does
-- Standardizes column names to `snake_case`
-- Normalizes missing values (`"N/A"`, `"NULL"`, `"?"`, blanks)
-- Infers semantic hints + primitive types from names and samples
-- Cleans numeric/date/boolean columns with type coercion
-- Upper-cases code columns (ICD/CPT/LOINC, etc.)
-- Normalizes phone/ZIP/gender fields
-- Optional de-identification for email/phone/SSN/name-like fields
-- Drops fully empty columns and duplicates (configurable)
-- Generates explainable QC metrics for missing rates and invalid conversions
-- Classifies QC issues using `rate x impact` severity scoring with reasons
-- Computes pre-clean and post-clean RAG readiness with actionable checks
-- Persists cleaning run history with outcomes, quality gate status, and evidence
-- Supports usage intent (training/inference/analytics/share) for default rules
-- Output formats: CSV, JSONL, Parquet (requires `pyarrow`)
-- Domain-aware assessment for EHR, Claims, Labs, and Pharmacy
+- **FastAPI**: Serves the API, workflow routes, provider discovery, and the static frontend from a single local app.
+- **Pandas**: Powers dataset profiling, normalization, and QC-oriented cleanup logic on local files.
+- **SQLite + SQLAlchemy**: Stores dataset metadata, run history, and diagnostics so workflows remain inspectable after each run.
+- **Vanilla JavaScript + CSS**: Keeps the UI lightweight, direct, and easy to demo without a frontend build pipeline.
+- **Ollama**: Provides an optional local LLM for cleanup planning without making cloud model access a requirement.
+- **PowerShell launch scripts**: Deliver one-click startup, health checks, and smoke-path validation on Windows.
 
-### Usage Intent Defaults
-- `training` / `external_share`: defaults to `HIPAA Safe Harbor`
-- `inference` / `analytics`: defaults to `No de-identification` (can be overridden)
-Note: intended usage only sets privacy defaults; it does not drop data by itself.
+## Run Locally
 
-### Safe Type Coercion (Default)
-- Date/number/boolean coercion only happens when parse success >= 60%.
-- When coercion is applied, invalid values are preserved (safe mode) instead of dropped.
+### One-click Windows path
 
-### HIPAA Safe Harbor (Default Privacy Mode)
-- Masks direct identifiers (name, email, phone, SSN, IDs).
-- Generalizes dates to year only; DOB ages > 89 become `90+`.
-- Truncates ZIP to first 3 digits (with `00` suffix).
-
-### Domain-Aware Validation (Highlights)
-- ICD-10, CPT/HCPCS, LOINC, NDC, RxNorm format checks
-- Date sanity checks (DOB future dates, encounter dates in future)
-- Negative monetary value checks
-
-### Outcome Traceability (Current)
-- Every cleaning run is persisted as a `clean_run` record in SQLite.
-- Each run stores:
-  - QC payload
-  - outcome metrics (`pass|warn|fail`)
-  - quality gate summary (`warn` mode by default)
-  - RAG readiness snapshot
-- Run history is available via API and rendered in the UI.
-
-## Folder Structure
-- `backend/` FastAPI app, DB models, cleaning engine, tests
-- `frontend/` Static UI served at `/`
-- `data/` Raw + cleaned datasets and sample input
-- `scripts/` Run, test, and demo scripts
-
-## Source Coverage (MVP)
-- File upload (CSV/TSV/JSONL/Parquet)
-- Connector placeholders for Google Drive, AWS S3, Snowflake, Oracle, FHIR/HL7 (UI only)
-
-## Quick Start
-1. Install dependencies (first run will auto-install if you use `npm run dev`):
-```
-powershell
-python -m pip install -r backend\requirements.txt
+```powershell
+.\RUN_HCDATA_1_CLICK.cmd
 ```
 
-2. Start the backend (serves frontend too):
-```
-powershell
-.\scripts\run_backend.ps1
-```
+The launcher bootstraps `.venv`, installs backend dependencies if needed, starts the app on an available local port, checks `/api/health`, probes Ollama, and opens the browser.
 
-Or use the one-command bootstrap:
-```
-powershell
-npm run dev
-```
+### Developer commands
 
-3. Open the UI:
-```
-http://localhost:8000
-```
-
-## Demo Script
-Run the scripted demo (assumes the server is already running):
-```
-powershell
-.\scripts\test_tool.ps1
-```
-This will:
-- Upload `data\sample_messy.csv`
-- Run the cleaning pipeline
-- Download the cleaned CSV to `data\cleaned\demo_cleaned.csv`
-
-## Tests
-```
-powershell
+```powershell
+.\scripts\dev.ps1
 .\scripts\run_tests.ps1
+.\scripts\test_tool.ps1 -BaseUrl http://127.0.0.1:8000
 ```
 
-## API Endpoints
-- `POST /api/datasets` (multipart) upload dataset
-- `GET /api/datasets` list datasets
-- `GET /api/datasets/{id}` dataset detail
-- `POST /api/datasets/{id}/clean` run cleaning
-- `GET /api/datasets/{id}/runs` list persisted cleaning runs
-- `GET /api/runs/{run_id}` fetch run detail
-- `GET /api/runs/{run_id}/outcomes` fetch run outcomes + quality gate
-- `GET /api/datasets/{id}/preview?kind=raw|cleaned` data preview (limit/offset supported)
-- `GET /api/datasets/{id}/download?kind=raw|cleaned` file download
-- `GET /api/health` health check
+### Optional Ollama setup
 
-## MVP Limitations
-- CSV/TSV/JSONL/Parquet support (Parquet requires `pyarrow` or `fastparquet`)
-- Large files use streaming mode for CSV/TSV (duplicate/empty-column removal disabled)
-- Heuristic semantic inference
-- De-identification is a basic mask (not HIPAA compliant)
+```powershell
+ollama serve
+ollama list
+```
 
-If you want this pushed to production quality, we can add:
-- Robust schema mapping + column dictionary editing
-- Data lineage tracking
-- Role-based access + audit logs
-- Advanced de-identification and validation rules
-- Streaming and large-file support
+If Ollama is not running, the app still works in deterministic mode.
+
+## Demo Dataset And Sample Data
+
+- Primary sample: `data/sample_messy.csv`
+- The included sample is synthetic and safe for screenshots, demos, and public repo artifacts
+- The demo path is designed around local file upload rather than cloud connectors
+
+If you want to try the LLM-assisted path, start Ollama first and choose a planner-safe local model from the dropdown. Oversized, embedding, and vision models are intentionally hidden from the picker.
+
+## Product Decisions And Tradeoffs
+
+- **Deterministic execution over freeform rewriting**: the LLM proposes a plan, but the actual cleanup stays auditable and rule-based.
+- **File upload as the primary source**: this keeps the main demo path reliable and easy to understand. Cloud connectors are not the center of the public repo story.
+- **Guided workflow over feature sprawl**: the app optimizes for a bounded operator flow instead of a large exploratory dashboard.
+- **Local-first by default**: SQLite, local files, and local Ollama reduce setup friction and keep the trust model easy to explain.
+
+## Roadmap
+
+- Stronger before-and-after field-level explainability for cleanup decisions
+- More domain-specific rule packs for claims, labs, and pharmacy datasets
+- Better schema contract and drift handling across repeated uploads
+- Richer export summaries for analytics and downstream AI handoff
+
+## Supporting Docs
+
+- [Case study](docs/CASE-STUDY.md)
+- [60-second demo script](docs/DEMO-SCRIPT.md)
+- [Resume and LinkedIn bullets](docs/RESUME-BULLETS.md)
+- [Publish steps and GitHub metadata](docs/PUBLISH-STEPS.md)
+- [Product history](docs/product-history/README.md)
+
+## License
+
+[MIT](LICENSE)

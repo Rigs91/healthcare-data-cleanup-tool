@@ -8,7 +8,7 @@ from typing import Any
 from app.config import BASE_DIR
 
 
-FEATURE_REGISTRY_PATH = Path(BASE_DIR) / "docs" / "rollout" / "features.json"
+FEATURE_REGISTRY_PATH = Path(BASE_DIR) / "backend" / "app" / "assets" / "feature_registry.json"
 _FEATURE_REGISTRY_CACHE: dict[str, Any] | None = None
 _FEATURE_REGISTRY_MTIME: int | None = None
 
