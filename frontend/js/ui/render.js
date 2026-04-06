@@ -65,13 +65,8 @@ function summarizeFilteredModels(provider) {
   if (filtered.length === 0) {
     return "";
   }
-
-  const preview = filtered
-    .slice(0, 3)
-    .map((item) => `${item.name}${item.reason ? ` (${item.reason})` : ""}`)
-    .join(", ");
-  const suffix = filtered.length > 3 ? `, and ${filtered.length - 3} more` : "";
-  return `Hidden from the planner-safe picker: ${preview}${suffix}.`;
+  const count = filtered.length;
+  return `${count} installed model${count === 1 ? "" : "s"} are hidden because they are too large or not a supported text model.`;
 }
 
 function summarizeValidationNotes(notes, limit = 2) {
@@ -93,19 +88,19 @@ function summarizeValidationNotes(notes, limit = 2) {
 
 function providerStatusDetail(provider, models, installedModels, filteredModels) {
   if (!provider.enabled) {
-    return "Backend support for Ollama is disabled. Deterministic cleanup is still available.";
+    return "Ollama support is disabled. The standard cleanup path is still available.";
   }
 
   if (!provider.reachable) {
-    return provider.error || "Ollama was not reachable. Start the local daemon or switch to deterministic cleanup.";
+    return provider.error || "Ollama is not available right now. Start it locally or stay on the standard cleanup path.";
   }
 
   const hiddenCount = filteredModels.length || Math.max(0, installedModels.length - models.length);
 
   if (!models.length) {
-    const base = `Local provider reachable at ${provider.baseUrl || "configured endpoint"}, but no planner-safe local models are available.`;
+    const base = "Ollama is available, but no supported local models are ready for this workflow.";
     const hiddenText = hiddenCount > 0
-      ? ` ${hiddenCount} installed local model${hiddenCount === 1 ? "" : "s"} were hidden from the picker.`
+      ? ` ${hiddenCount} installed model${hiddenCount === 1 ? "" : "s"} are hidden from the picker.`
       : "";
     return `${base}${hiddenText}${provider.error ? ` ${provider.error}` : ""}`;
   }
@@ -114,9 +109,9 @@ function providerStatusDetail(provider, models, installedModels, filteredModels)
     ? ` ${provider.error}`
     : "";
   const hiddenText = hiddenCount > 0
-    ? ` ${hiddenCount} installed local model${hiddenCount === 1 ? "" : "s"} are hidden from this picker.`
+    ? ` ${hiddenCount} installed model${hiddenCount === 1 ? "" : "s"} are hidden from this picker.`
     : "";
-  return `Local provider reachable at ${provider.baseUrl || "configured endpoint"}. ${models.length} planner-safe local model${models.length === 1 ? "" : "s"} available.${hiddenText}${requestedIssue}`;
+  return `Local Ollama is ready. ${models.length} supported model${models.length === 1 ? "" : "s"} available.${hiddenText}${requestedIssue}`;
 }
 
 function workflowExecution(workflow) {
@@ -585,13 +580,10 @@ function renderProviderControls(elements, state) {
       setText(elements.ollamaStatusBadge, "Ollama: checking");
     } else if (provider.enabled && provider.reachable && models.length > 0) {
       elements.ollamaStatusBadge.classList.add("ok");
-      setText(
-        elements.ollamaStatusBadge,
-        `Ollama: ready (${models.length} selectable${models.length === 1 ? "" : "s"})`
-      );
+      setText(elements.ollamaStatusBadge, "Ollama: available");
     } else if (provider.enabled && provider.reachable) {
       elements.ollamaStatusBadge.classList.add("warn");
-      setText(elements.ollamaStatusBadge, "Ollama: no safe models");
+      setText(elements.ollamaStatusBadge, "Ollama: no supported models");
     } else {
       elements.ollamaStatusBadge.classList.add("warn");
       setText(elements.ollamaStatusBadge, "Ollama: unavailable");
@@ -642,14 +634,16 @@ export function renderApp(elements, state) {
   elements.apiHealthBadge.classList.remove("ok", "warn");
   elements.apiHealthBadge.classList.add(isHealthy ? "ok" : "warn");
   setText(elements.apiHealthBadge, isHealthy ? "API: connected" : "API: unavailable");
-  setText(elements.workflowVersionChip, `Workflow: ${workflowVersion}`);
+  setText(
+    elements.workflowVersionChip,
+    workflowVersion === "v3_guided" ? "Guided flow" : "Compatibility mode"
+  );
 
-  const sourceSummary = Array.isArray(health.capabilities?.supported_sources)
-    ? health.capabilities.supported_sources.join(", ")
-    : "unknown";
   setText(
     elements.apiHealthDetail,
-    `Service ${health.service || "hc-data-cleanup-ai"} v${health.version || "unknown"} | Supported sources: ${sourceSummary} | Ollama ${ollama.reachable ? "ready" : "not ready"}`
+    isHealthy
+      ? `Local file upload | Synthetic sample ready | Ollama ${ollama.reachable ? "optional" : "not connected"}`
+      : "API unavailable"
   );
 
   const workflow = state.workflow;

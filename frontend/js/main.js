@@ -288,7 +288,7 @@ function setLlmModel(llmModel) {
 }
 
 async function bootstrap() {
-  store.setState({ info: "Checking API health..." });
+  store.setState({ info: "" });
   try {
     const health = await api.health();
     const mode = health?.ui_workflow_version === "v3_guided" ? "v3_guided" : "v2_legacy";
@@ -307,10 +307,7 @@ async function bootstrap() {
           selectedModel: defaultModel,
         },
       },
-      info:
-        mode === "v3_guided"
-          ? "Guided v3 workflow is active."
-          : "Guided UI is active with legacy API compatibility mode.",
+      info: "",
       error: "",
     });
 

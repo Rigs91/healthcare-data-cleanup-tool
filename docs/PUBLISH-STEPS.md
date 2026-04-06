@@ -6,7 +6,7 @@
 
 ## GitHub About Text
 
-`Guided healthcare dataset cleanup with deterministic transforms and optional local Ollama planning.`
+`Clean up messy healthcare datasets with guided profiling, safer normalization, and optional local Ollama planning.`
 
 ## Suggested Website Field
 
@@ -19,18 +19,18 @@ Leave the website blank unless you add a short demo video, GIF walkthrough, or p
 - `data-quality`
 - `data-cleaning`
 - `data-normalization`
+- `data-platform`
 - `fastapi`
 - `ollama`
-- `local-llm`
 - `synthetic-data`
-- `workflow-ui`
+- `workflow-design`
 
 ## Manual Publish Commands
 
 ```powershell
 gh repo create healthcare-data-cleanup-tool --public --source . --remote origin --push
-gh repo edit --description "Guided healthcare dataset cleanup with deterministic transforms and optional local Ollama planning."
-gh repo edit --add-topic healthcare --add-topic healthcare-data --add-topic data-quality --add-topic data-cleaning --add-topic data-normalization --add-topic fastapi --add-topic ollama --add-topic local-llm --add-topic synthetic-data --add-topic workflow-ui
+gh repo edit --description "Clean up messy healthcare datasets with guided profiling, safer normalization, and optional local Ollama planning."
+gh repo edit --add-topic healthcare --add-topic healthcare-data --add-topic data-quality --add-topic data-cleaning --add-topic data-normalization --add-topic data-platform --add-topic fastapi --add-topic ollama --add-topic synthetic-data --add-topic workflow-design
 ```
 
 ## Pre-Publish Check

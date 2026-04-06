@@ -1,19 +1,19 @@
 # Resume Bullets
 
-- Built a local-first healthcare data cleanup product that profiles messy claims and EHR-style datasets, flags schema and quality issues, and exports cleaner outputs through a guided workflow.
-- Added deterministic cleanup orchestration with optional local Ollama-assisted planning, keeping final transforms auditable while using LLMs for schema interpretation and cleanup recommendations.
-- Packaged the project for public demo use with a one-click Windows launcher, health checks, run history, diagnostics, synthetic sample data, and portfolio-ready documentation.
+- Built a guided healthcare data cleanup product that profiles messy datasets, surfaces quality risks, and exports cleaner outputs through a trust-oriented operator workflow.
+- Scoped AI usage to optional local Ollama-assisted planning while keeping cleanup execution deterministic and auditable for stronger data trust and explainability.
+- Packaged the product as a public-safe local demo with one-click startup, synthetic sample data, diagnostics, run history, and portfolio-ready documentation.
 
 # LinkedIn Or Project Bullets
 
-- Designed and shipped a guided healthcare data cleanup workflow for messy CSV, TSV, JSONL, and Parquet datasets.
-- Combined deterministic normalization with optional local Ollama planning to keep AI usage practical, explainable, and demoable.
-- Turned the project into a public-safe portfolio repo with synthetic sample data, screenshots, launch scripts, and a concise demo story.
+- Designed a local-first workflow for cleaning messy healthcare datasets before analytics or AI handoff.
+- Combined trust-oriented deterministic cleanup with optional local LLM planning for schema interpretation and recommendations.
+- Shipped a portfolio-ready repo with screenshots, launcher scripts, synthetic sample data, and a concise live demo story.
 
 # Likely Interview Talking Points
 
-- Why I chose a guided operator workflow instead of a large exploratory dashboard
-- How I balanced deterministic cleanup with optional LLM assistance
-- How the product handles trust, traceability, and public-safe demo data
-- Why local-first packaging matters for usability, demos, and privacy-sensitive workflows
-- What I would add next if this evolved into a broader data platform product
+- Why I chose a guided operator flow instead of a broad data workbench
+- How I balanced trust, explainability, and scoped AI usage
+- How the product makes data quality decisions visible before export
+- Why local-first packaging matters for demos, privacy, and adoption
+- How I would extend this into a broader healthcare data platform without losing clarity

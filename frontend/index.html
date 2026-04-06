@@ -15,9 +15,9 @@
     <main class="app-shell">
       <header class="topbar">
         <div>
-          <p class="eyebrow">Healthcare Data Quality Workflow</p>
+          <p class="eyebrow">Healthcare Data Workflow</p>
           <h1>Healthcare Data Cleanup Tool</h1>
-          <p class="subtitle">Profile messy healthcare extracts, review cleanup decisions, and export safer standardized data for analytics or downstream AI workflows.</p>
+          <p class="subtitle">Profile messy healthcare datasets, review cleanup decisions, and export cleaner outputs with more confidence.</p>
         </div>
         <div class="topbar-meta">
           <div id="api-health-badge" class="badge">API: checking</div>
@@ -47,7 +47,7 @@
               <div class="section-heading">
                 <div>
                   <h4 id="cleanup-engine-heading">Cleanup engine</h4>
-                  <p class="helper-text">Choose rules-based cleanup or let a planner-safe local Ollama model interpret columns and propose a validated cleanup plan.</p>
+                  <p class="helper-text">Choose the standard cleanup path or use a local Ollama model to suggest a cleanup plan before the final deterministic run.</p>
                 </div>
                 <div id="ollama-status-badge" class="badge">Ollama: checking</div>
               </div>
@@ -56,13 +56,13 @@
                 <label id="mode-card-deterministic" class="mode-card active">
                   <input id="cleanup-mode-deterministic" type="radio" name="cleanup-mode" value="deterministic" checked />
                   <span class="mode-card-title">Deterministic</span>
-                  <span class="mode-card-copy">Fast, auditable, and always available when the API is up.</span>
+                  <span class="mode-card-copy">The clearest and fastest demo path. Cleanup stays predictable and reviewable.</span>
                 </label>
 
                 <label id="mode-card-ollama" class="mode-card">
                   <input id="cleanup-mode-ollama" type="radio" name="cleanup-mode" value="ollama_assisted" />
                   <span class="mode-card-title">Ollama local model</span>
-                  <span class="mode-card-copy">Uses a local LLM to interpret columns and suggest cleanup strategy. Deterministic rules still perform the actual transforms.</span>
+                  <span class="mode-card-copy">Uses a local model to interpret the dataset and suggest cleanup strategy. The final cleanup still runs through deterministic rules.</span>
                 </label>
               </div>
 
@@ -79,7 +79,7 @@
                   </select>
                 </label>
                 <p id="ollama-filtered-note" class="muted-note hidden"></p>
-                <p class="helper-text">Only planner-safe local models appear here. Compact profile summaries and bounded sample rows are sent to the selected local model. The full dataset still stays in the deterministic engine.</p>
+                <p class="helper-text">Only supported local text models appear here. The model sees compact profile context, while the full dataset stays in the cleanup engine.</p>
               </div>
             </section>
 
@@ -216,7 +216,7 @@
         </section>
       </section>
 
-      <footer id="api-health-detail" class="footer-note">Demo-safe workflow for synthetic healthcare datasets. API details loading...</footer>
+      <footer id="api-health-detail" class="footer-note">Local-first demo. Synthetic sample ready.</footer>
     </main>
 
     <script type="module" src="js/main.js?v=3.0.0"></script>
